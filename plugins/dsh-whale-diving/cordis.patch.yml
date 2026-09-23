@@ -1,0 +1,9 @@
+# dsh-whale-diving bundle patch: one row.
+#
+# 安装到 profile 后，这一行让 Loader 加载本包的宿主半边（lib/index.js，空实现），
+# 而浏览器半边（lib/client.js）由 dsh-client-modules 依据 package.json 的
+# dsh.client 声明扫描进 window.__DSH_BOOT__。两者都靠本行的 name 与包名一致：
+# name 既是 Loader 解析的模块说明符，也是浏览器模块注册的 id。
+- insert:
+    - id: whale-diving
+      name: dsh-whale-diving

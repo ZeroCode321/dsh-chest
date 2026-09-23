@@ -1,0 +1,2557 @@
+From eebd8c69465c247ba09a6d891acf4f3f9151b014 Mon Sep 17 00:00:00 2001
+From: ZeroCode321 <ZeroCode321@users.noreply.github.com>
+Date: Wed, 23 Sep 2026 00:20:18 +0800
+Subject: [PATCH] feat(chest): host-side plugin and skill vault
+
+A chest holds two kinds of real artifact rather than text a model is asked to
+pretend with: plugin packages it can install into the booted profile, and
+SKILL.md files under the user skill root that the harness's own skill provider
+discovers. Both export to one `.chest` document for sharing, and both import
+back.
+
+The gateway scans the store, the registered external folders, the skill root,
+and the profile manifest on every read; one serialized queue owns every
+mutation; the profile edits an install makes are a `link:` dependency, the
+bundle name in `dsh.profile.bundles`, and the `node_modules` link.
+---
+ packages/api/remotes/package.json             |   2 +
+ packages/api/remotes/src/client/index.ts      |   8 +-
+ packages/api/remotes/src/index.ts             |   1 +
+ packages/api/remotes/src/remote-events.ts     |   1 +
+ packages/api/remotes/tsconfig.client.json     |   3 +
+ packages/api/remotes/tsconfig.host.json       |   3 +
+ packages/host/README.md                       |   1 +
+ packages/host/apiproxy/package.json           |   1 +
+ packages/host/apiproxy/src/api-proxy.ts       |   2 +
+ packages/host/apiproxy/tsconfig.json          |   3 +
+ packages/host/plugin-shelf/README.md          | 106 +++
+ packages/host/plugin-shelf/package.json       |  70 ++
+ packages/host/plugin-shelf/src/index.ts       | 787 ++++++++++++++++++
+ packages/host/plugin-shelf/src/invariant.ts   |  24 +
+ packages/host/plugin-shelf/src/plugins.ts     | 238 ++++++
+ packages/host/plugin-shelf/src/profile.ts     | 272 ++++++
+ packages/host/plugin-shelf/src/skills.ts      | 207 +++++
+ packages/host/plugin-shelf/src/state.ts       | 111 +++
+ packages/host/plugin-shelf/src/types.ts       | 184 ++++
+ .../plugin-shelf/tests/plugin-shelf.spec.ts   | 231 +++++
+ packages/host/plugin-shelf/tsconfig.json      |  24 +
+ tsconfig.base.json                            |   3 +
+ tsconfig.host.json                            |   1 +
+ 23 files changed, 2282 insertions(+), 1 deletion(-)
+ create mode 100644 packages/host/plugin-shelf/README.md
+ create mode 100644 packages/host/plugin-shelf/package.json
+ create mode 100644 packages/host/plugin-shelf/src/index.ts
+ create mode 100644 packages/host/plugin-shelf/src/invariant.ts
+ create mode 100644 packages/host/plugin-shelf/src/plugins.ts
+ create mode 100644 packages/host/plugin-shelf/src/profile.ts
+ create mode 100644 packages/host/plugin-shelf/src/skills.ts
+ create mode 100644 packages/host/plugin-shelf/src/state.ts
+ create mode 100644 packages/host/plugin-shelf/src/types.ts
+ create mode 100644 packages/host/plugin-shelf/tests/plugin-shelf.spec.ts
+ create mode 100644 packages/host/plugin-shelf/tsconfig.json
+
+diff --git a/packages/api/remotes/package.json b/packages/api/remotes/package.json
+index 42a7d14..59203e9 100644
+--- a/packages/api/remotes/package.json
++++ b/packages/api/remotes/package.json
+@@ -66,6 +66,7 @@
+     "@deepseek-ai/dsh-goal": "workspace:^",
+     "@deepseek-ai/dsh-cordis-host-runner": "workspace:^",
+     "@deepseek-ai/dsh-host-plugin-inventory": "workspace:^",
++    "@deepseek-ai/dsh-host-plugin-shelf": "workspace:^",
+     "@deepseek-ai/dsh-invariants": "workspace:^",
+     "@deepseek-ai/dsh-agent-presets": "workspace:^",
+     "@deepseek-ai/dsh-llm": "workspace:^",
+@@ -83,6 +84,7 @@
+     "@deepseek-ai/dsh-goal": "workspace:^",
+     "@deepseek-ai/dsh-cordis-host-runner": "workspace:^",
+     "@deepseek-ai/dsh-host-plugin-inventory": "workspace:^",
++    "@deepseek-ai/dsh-host-plugin-shelf": "workspace:^",
+     "@deepseek-ai/dsh-invariants": "workspace:^",
+     "@deepseek-ai/dsh-agent-presets": "workspace:^",
+     "@deepseek-ai/dsh-llm": "workspace:^",
+diff --git a/packages/api/remotes/src/client/index.ts b/packages/api/remotes/src/client/index.ts
+index 210ec0b..a517e0c 100644
+--- a/packages/api/remotes/src/client/index.ts
++++ b/packages/api/remotes/src/client/index.ts
+@@ -5,14 +5,20 @@ import commandsRemote from '@deepseek-ai/dsh-commands/remote'
+ import goalsRemote from '@deepseek-ai/dsh-goal/remote'
+ import dynamicRemote from '@deepseek-ai/dsh-cordis-host-runner/remote'
+ import pluginInventoryRemote from '@deepseek-ai/dsh-host-plugin-inventory/remote'
++import pluginShelfRemote from '@deepseek-ai/dsh-host-plugin-shelf/remote'
+ import messageFeedbackRemote from '@deepseek-ai/dsh-message-feedback/remote'
+ import type { TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol'
+ 
+ export type { TypertClientRemote as ClientRemote } from '@deepseek-ai/dsh-typert-protocol'
+ export type { PluginInventorySnapshot } from '@deepseek-ai/dsh-host-plugin-inventory/types'
++export type {
++  ChestBundle, ChestExportResult, ChestFailure, ChestPluginEntry, ChestPluginRequest, ChestResult,
++  ChestSkillDraft, ChestSkillEntry, ChestSnapshot,
++} from '@deepseek-ai/dsh-host-plugin-shelf/types'
+ export type {} from '@deepseek-ai/dsh-commands/remote'
+ export type {} from '@deepseek-ai/dsh-goal/remote'
+ export type {} from '@deepseek-ai/dsh-host-plugin-inventory/remote'
++export type {} from '@deepseek-ai/dsh-host-plugin-shelf/remote'
+ export type {} from '@deepseek-ai/dsh-message-feedback/remote'
+ // The forwarded-event allowlist's selection seat: without it in the consumer's
+ // compilation face `TypertRemoteEvent` is `never` and every `$on` call fails.
+@@ -106,7 +112,7 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
+   const disposers: Array<() => Promise<void>> = []
+   try {
+     for (const contribution of [
+-      commandsRemote, goalsRemote, dynamicRemote, pluginInventoryRemote, messageFeedbackRemote,
++      commandsRemote, goalsRemote, dynamicRemote, pluginInventoryRemote, pluginShelfRemote, messageFeedbackRemote,
+     ]) {
+       disposers.push(await ctx.remote.$mount(contribution))
+     }
+diff --git a/packages/api/remotes/src/index.ts b/packages/api/remotes/src/index.ts
+index 6572c11..cc15e64 100644
+--- a/packages/api/remotes/src/index.ts
++++ b/packages/api/remotes/src/index.ts
+@@ -10,6 +10,7 @@ import { API_REMOTE_FORWARDED_EVENTS } from './remote-events.ts'
+ import type {} from '@deepseek-ai/dsh-commands/types'
+ import type {} from '@deepseek-ai/dsh-cordis-host-runner/types'
+ import type {} from '@deepseek-ai/dsh-credentials/types'
++import type {} from '@deepseek-ai/dsh-host-plugin-shelf/types'
+ import type {} from '@deepseek-ai/dsh-llm/types'
+ import type {} from '@deepseek-ai/dsh-agent-presets/types'
+ import type {} from '@deepseek-ai/dsh-settings/types'
+diff --git a/packages/api/remotes/src/remote-events.ts b/packages/api/remotes/src/remote-events.ts
+index 2174336..cd9fd55 100644
+--- a/packages/api/remotes/src/remote-events.ts
++++ b/packages/api/remotes/src/remote-events.ts
+@@ -25,5 +25,6 @@ export const API_REMOTE_FORWARDED_EVENTS = [
+   'cordis/inspect-query',
+   'cordis/inspect-query-resolved',
+   'llm/adapters-updated',
++  'pluginShelf/change',
+   'settings/document-updated',
+ ] as const
+diff --git a/packages/api/remotes/tsconfig.client.json b/packages/api/remotes/tsconfig.client.json
+index a0161dd..1703f8f 100644
+--- a/packages/api/remotes/tsconfig.client.json
++++ b/packages/api/remotes/tsconfig.client.json
+@@ -36,6 +36,9 @@
+     {
+       "path": "../../host/plugin-inventory"
+     },
++    {
++      "path": "../../host/plugin-shelf"
++    },
+     {
+       "path": "../../interaction/commands"
+     },
+diff --git a/packages/api/remotes/tsconfig.host.json b/packages/api/remotes/tsconfig.host.json
+index 61eae81..b080e11 100644
+--- a/packages/api/remotes/tsconfig.host.json
++++ b/packages/api/remotes/tsconfig.host.json
+@@ -28,6 +28,9 @@
+     {
+       "path": "../../interaction/commands"
+     },
++    {
++      "path": "../../host/plugin-shelf"
++    },
+     {
+       "path": "../../llm/llm"
+     },
+diff --git a/packages/host/README.md b/packages/host/README.md
+index 28a93e0..b16e905 100644
+--- a/packages/host/README.md
++++ b/packages/host/README.md
+@@ -14,6 +14,7 @@ The host side of the dsh web GUI: the API gateway every client shape shares, and
+ | [`directory-picker-browse/`](directory-picker-browse/README.md) | In-app directory-browser backend and interaction | registers `ctx.directoryPicker` |
+ | [`directory-picker-auto/`](directory-picker-auto/README.md) | Host-adaptive picker composition | mounts a backend |
+ | [`plugin-inventory/`](plugin-inventory/README.md) | Read-only projection of current Loader entries | Remote `pluginInventory/list` |
++| [`plugin-shelf/`](plugin-shelf/README.md) | The chest: plugin store and user skill root, with profile install and `.chest` bundles | Remote `pluginShelf/*` |
+ 
+ `apiproxy` remains transport-independent; [`client/connection`](../client/connection/README.md) supplies the browser/HTTP carrier. Picker implementations replace one another behind the shared seam.
+ 
+diff --git a/packages/host/apiproxy/package.json b/packages/host/apiproxy/package.json
+index ba83efe..ba0cc08 100644
+--- a/packages/host/apiproxy/package.json
++++ b/packages/host/apiproxy/package.json
+@@ -54,6 +54,7 @@
+     "@deepseek-ai/dsh-credentials": "workspace:^",
+     "@deepseek-ai/dsh-goal": "workspace:^",
+     "@deepseek-ai/dsh-host-directory-picker": "workspace:^",
++    "@deepseek-ai/dsh-host-plugin-shelf": "workspace:^",
+     "@deepseek-ai/dsh-llm": "workspace:^",
+     "@deepseek-ai/dsh-native-command": "workspace:^",
+     "@deepseek-ai/dsh-session": "workspace:^",
+diff --git a/packages/host/apiproxy/src/api-proxy.ts b/packages/host/apiproxy/src/api-proxy.ts
+index bda9936..664254c 100644
+--- a/packages/host/apiproxy/src/api-proxy.ts
++++ b/packages/host/apiproxy/src/api-proxy.ts
+@@ -69,6 +69,8 @@ import { GoalError } from '@deepseek-ai/dsh-goal'
+ import type { GoalRef as CoreGoalRef } from '@deepseek-ai/dsh-goal'
+ // Type-only edges: resolve the command-change stream and `ctx.get('skills')`.
+ import type {} from '@deepseek-ai/dsh-commands'
++// Type-only: the plugin-shelf change notification (client-safe `./types`).
++import type {} from '@deepseek-ai/dsh-host-plugin-shelf/types'
+ // Type-only: the dynamic-package runner's forwarded-event declarations. Its
+ // client-safe `./types` subpath deliberately, not the package root — the root
+ // merges `ctx.dynamicCordisRunner`, and a dependency on that package would
+diff --git a/packages/host/apiproxy/tsconfig.json b/packages/host/apiproxy/tsconfig.json
+index 3ed38b3..9a92394 100644
+--- a/packages/host/apiproxy/tsconfig.json
++++ b/packages/host/apiproxy/tsconfig.json
+@@ -80,6 +80,9 @@
+     {
+       "path": "../../interaction/commands"
+     },
++    {
++      "path": "../../host/plugin-shelf"
++    },
+     {
+       "path": "../../interaction/user-approval"
+     },
+diff --git a/packages/host/plugin-shelf/README.md b/packages/host/plugin-shelf/README.md
+new file mode 100644
+index 0000000..2f02cf2
+--- /dev/null
++++ b/packages/host/plugin-shelf/README.md
+@@ -0,0 +1,106 @@
++# @deepseek-ai/dsh-host-plugin-shelf
++
++The **chest**: the Host half of the sidebar's plugin-and-skill vault. Everything
++a person downloads, authors, or develops for this harness lands here, in two
++groups that are both real artifacts on disk rather than text a model is asked to
++pretend with.
++
++## What a chest holds
++
++- **plugin** — a directory holding a DSH plugin package: `package.json`, a
++  `cordis.patch.yml` patch layer, and optionally a browser half. The chest owns a
++  store under `$DSH_HOME/chest/plugins` and can also register a folder in place
++  (a plugin someone is developing). Installing one means three concrete profile
++  edits — a `link:` dependency, the bundle name in `dsh.profile.bundles`, and the
++  `node_modules` link — so install, uninstall, and reorder are real composition
++  changes that apply on the next restart. The chest reports that pending restart
++  instead of pretending the running process already changed.
++- **skill** — a `SKILL.md` under the user skill root (`$DSH_HOME/skills`), the
++  same file the `skill` tool and the `/name` composer reference discover. A skill
++  authored here is therefore immediately a real skill, and a skill someone shares
++  drops into any skill root.
++
++Either kind exports to one `.chest` document: a single JSON file carrying every
++byte of the artifact, which this gateway imports back.
++
++## Where the files live
++
++| path | owner | what it is |
++| ---- | ----- | ---------- |
++| `$DSH_HOME/chest/chest.json` | this package | bookkeeping: registered external folders, presentation order, pending restart |
++| `$DSH_HOME/chest/plugins/<id>/` | this package | plugin packages the chest owns |
++| `$DSH_HOME/skills/<id>/SKILL.md` | this package (writes), `dsh-skill-filesystem` (reads) | authored skills |
++| `$DSH_HOME/profiles/<name>/package.json` | the deployment (this package edits it on install) | the bundle layer order an install changes |
++
++## Remote surface
++
++The service registers itself as `ctx.pluginShelf` and publishes the
++`pluginShelf` namespace:
++
++| method | request | response |
++| ------ | ------- | -------- |
++| `list` | — | `ChestSnapshot` (plugins, skills, booted profile, pending restart) |
++| `importPlugin` | `ChestPluginRequest` (folder path or `.chest` bundle) | `ChestResult` |
++| `installPlugin` | `id` | `ChestResult` (profile dependency + bundle layer + link) |
++| `uninstallPlugin` | `id` | `ChestResult` |
++| `deletePlugin` | `id` | `ChestResult` (uninstalls first; deletes a store copy's bytes) |
++| `reorderPlugins` | `ids` | `ChestResult` (also reorders the profile's bundle slots) |
++| `exportPlugin` | `id` | `ChestExportResult` (one `.chest` document) |
++| `createSkill` | `ChestSkillDraft` | `ChestResult` |
++| `importSkill` | `ChestBundle` | `ChestResult` |
++| `updateSkill` | `id` + `ChestSkillDraft` | `ChestResult` (keeps the shape the scan found) |
++| `deleteSkill` | `id` | `ChestResult` |
++| `reorderSkills` | `ids` | `ChestResult` (presentation order only; skills have no composition order) |
++| `exportSkill` | `id` | `ChestExportResult` (entry file plus resources) |
++
++Every mutating method answers with the whole listing afresh, so a client needs
++one round trip per action. Mutations are serialized behind one queue and emit
++`pluginShelf/change`; a chokidar watcher over the plugin store, the skill root,
++and the profile manifest emits the same event (debounced) for edits made outside
++the chest.
++
++## A bundle is the sharing format
++
++A `.chest` document is `{ format: 'dsh-chest', revision: 1, kind, id, name,
++description, createdAt, files }`, where each file carries a forward-slashed
++relative path and either `utf8` or `base64` content. Import refuses a document
++that is not that shape, and refuses any path that would escape the target
++directory, so a shared file can never write outside the chest.
++
++## Configuration
++
++| key | type | default | description |
++| --- | ---- | ------- | ----------- |
++| `root` | `string` | `dshHomePath('chest')` | Chest root holding the store and bookkeeping |
++| `skillRoot` | `string` | `dshHomePath('skills')` | User skill root the chest manages |
++
++## Model Experience
++
++### Skill files the chest writes
++
++#### What the model sees
++
++Nothing from this package directly: it registers no tool, prompt section, or catalog. What it writes is a `SKILL.md` in the user skill root, and `dsh-skill-filesystem` discovers that file for whichever preset mounts it, so a skill authored here reaches the model through that provider's catalog rather than through any surface of the chest.
++
++#### Token effect
++
++None from the chest itself: listing, reordering, exporting, and importing add no tokens to a request. A chest-authored skill costs tokens only when the agent loads it or a `/name` pick injects its body, and that cost belongs to the skill pipeline.
++
++#### KV Cache effect
++
++None. This package never edits earlier request tokens; it only reads and writes files on disk.
++
++## Known Limitations and Deferred Work
++
++- **A restart applies plugin changes** — the Loader composes its bundle layers at
++  boot and caches each package's client metadata for the process lifetime, so
++  installing, uninstalling, or reordering a plugin becomes visible only after
++  `dsh web` restarts. The chest says so rather than implying otherwise.
++- **No dependency resolution** — an install records a `link:` dependency and
++  creates the `node_modules` link itself; it never runs a package manager, so a
++  plugin that needs its own dependencies must ship them or be installed by hand.
++- **Store plugins are one level deep** — the store holds package directories
++  directly; a nested folder is not scanned.
++- **Skills are managed at the user root only** — project roots
++  (`.dsh/skills`, `.agents/skills`) and `~/.agents/skills` stay read-only for the
++  chest even though the provider reads them.
+diff --git a/packages/host/plugin-shelf/package.json b/packages/host/plugin-shelf/package.json
+new file mode 100644
+index 0000000..d6c5fd2
+--- /dev/null
++++ b/packages/host/plugin-shelf/package.json
+@@ -0,0 +1,70 @@
++{
++  "name": "@deepseek-ai/dsh-host-plugin-shelf",
++  "description": "The chest: the sidebar plugin store and user skill root, with profile install and .chest bundles, over a Remote",
++  "version": "0.1.0-rc.5",
++  "publishConfig": {
++    "access": "public"
++  },
++  "repository": {
++    "type": "git",
++    "url": "git+https://github.com/deepseek-ai/deepseek-harness.git",
++    "directory": "packages/host/plugin-shelf"
++  },
++  "type": "module",
++  "main": "lib/index.js",
++  "types": "lib/types/index.d.ts",
++  "exports": {
++    ".": {
++      "types": "./lib/types/index.d.ts",
++      "default": "./lib/index.js"
++    },
++    "./invariant": {
++      "types": "./lib/types/invariant.d.ts",
++      "default": "./lib/invariant.js"
++    },
++    "./types": {
++      "types": "./lib/types/types.d.ts",
++      "default": "./lib/types/types.js"
++    },
++    "./typert": {
++      "types": "./lib/typert.host.d.ts",
++      "default": "./lib/typert.host.js"
++    },
++    "./remote": {
++      "types": "./lib/typert.remote-client.d.ts",
++      "default": "./lib/typert.remote-client.js"
++    },
++    "./src/*": "./src/*",
++    "./package.json": "./package.json"
++  },
++  "files": [
++    "lib/index.js",
++    "lib/invariant.js",
++    "lib/types/**/*.js",
++    "lib/types/**/*.d.ts",
++    "lib/typert.host.js",
++    "lib/typert.host.d.ts",
++    "lib/typert.remote-client.js",
++    "lib/typert.remote-client.d.ts"
++  ],
++  "license": "MIT",
++  "dependencies": {
++    "chokidar": "^4.0.3",
++    "yaml": "^2.9.0",
++    "zod": "^4.4.3"
++  },
++  "peerDependencies": {
++    "@deepseek-ai/dsh-home-paths": "workspace:^",
++    "@deepseek-ai/dsh-invariants": "workspace:^",
++    "@deepseek-ai/dsh-typert-protocol": "workspace:^",
++    "@deepseek-ai/schemastery": "workspace:^",
++    "@deepseek-ai/cordis": "workspace:^"
++  },
++  "devDependencies": {
++    "@deepseek-ai/dsh-home-paths": "workspace:^",
++    "@deepseek-ai/dsh-invariants": "workspace:^",
++    "@deepseek-ai/dsh-typert-protocol": "workspace:^",
++    "@deepseek-ai/schemastery": "workspace:^",
++    "@deepseek-ai/cordis": "workspace:^"
++  }
++}
+diff --git a/packages/host/plugin-shelf/src/index.ts b/packages/host/plugin-shelf/src/index.ts
+new file mode 100644
+index 0000000..5c8f998
+--- /dev/null
++++ b/packages/host/plugin-shelf/src/index.ts
+@@ -0,0 +1,787 @@
++/**
++ * Chest gateway: the Host half of the sidebar chest.
++ *
++ * A chest holds two kinds of real artifact rather than text a model is asked to
++ * pretend with:
++ *
++ * - **plugin** — plugin packages. The chest owns a store under
++ *   `$DSH_HOME/chest/plugins` and can also register a folder in place (a plugin
++ *   someone is developing). Installing one means three concrete profile edits —
++ *   a `link:` dependency, the bundle name in `dsh.profile.bundles`, and the
++ *   `node_modules` link — so installing, uninstalling, and reordering are real
++ *   composition changes that take effect on the next restart. The chest says so
++ *   instead of pretending the running process already changed.
++ * - **skill** — `SKILL.md` files under the user skill root (`$DSH_HOME/skills`),
++ *   the same files the `skill` tool and the `/name` composer reference discover,
++ *   so a skill authored here is immediately a real skill.
++ *
++ * Both kinds export to one `.chest` document: a shareable single file carrying
++ * every byte of the artifact, which this gateway can import back.
++ *
++ * Every mutation runs through one serialized queue, writes bookkeeping to
++ * `chest.json`, and emits `pluginShelf/change` so observers re-list. Reads scan
++ * the filesystem on every call: there is no cache to go stale.
++ *
++ * @module @deepseek-ai/dsh-host-plugin-shelf
++ */
++
++import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
++import type { Dirent } from 'node:fs'
++import { basename, join, resolve } from 'node:path'
++import { Context, Service } from '@deepseek-ai/cordis'
++import s from '@deepseek-ai/schemastery'
++import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
++// Typert-generated ./typert and ./remote artifacts import Zod at runtime.
++import type {} from 'zod'
++import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
++import { watch as chokidarWatch } from 'chokidar'
++import {
++  applyOrder, emptyChestState, readChestState, writeChestState, type ChestState,
++} from './state.ts'
++import {
++  asChestBundle, exists, listTreeFiles, readPluginManifest, readTreeFiles, safeRelativePath,
++  writeBundleFiles,
++} from './plugins.ts'
++import {
++  installIntoProfile, profileRootOf, readProfile, reorderBundles, uninstallFromProfile,
++} from './profile.ts'
++import { SKILL_FILE_NAME, listSkills, removeSkill, slugOf, writeSkill, type SkillRecord } from './skills.ts'
++import type {
++  ChestBundle, ChestExportResult, ChestFailure, ChestPluginEntry, ChestPluginRequest,
++  ChestResult, ChestSkillDraft, ChestSkillEntry, ChestSnapshot,
++} from './types.ts'
++
++export type * from './types.ts'
++
++/** Watcher change-debounce; a burst of edits settles into one notify. */
++const NOTIFY_DEBOUNCE_MS = 150
++
++/** Ceiling on one shared artifact, so a stray folder cannot flood a bundle. */
++const MAX_BUNDLE_FILES = 2000
++
++/** Chest layout: the roots this deployment manages. */
++interface ChestLayout {
++  /** Chest root (`$DSH_HOME/chest`), holding the bookkeeping file. */
++  readonly root: string
++  /** Where the chest owns plugin packages. */
++  readonly plugins: string
++  /** The user skill root the chest manages. */
++  readonly skills: string
++}
++
++/** Deployment configuration: where the chest and its skill root live. */
++export interface Config {
++  /** Chest root; defaults to `$DSH_HOME/chest`. */
++  readonly root: string
++  /** Skill root the chest manages; defaults to `$DSH_HOME/skills`. */
++  readonly skillRoot: string
++}
++
++declare module '@deepseek-ai/cordis' {
++  interface Context {
++    pluginShelf: PluginShelfGateway
++  }
++}
++
++/** Build a frozen success branch. */
++function success(value: ChestSnapshot): ChestResult {
++  return Object.freeze({ ok: true, value })
++}
++
++/** Build a frozen business-failure branch. */
++function rejected(error: ChestFailure): ChestResult {
++  return Object.freeze({ ok: false, error: Object.freeze(error) })
++}
++
++/** Build a frozen export-failure branch. */
++function rejectedExport(error: ChestFailure): ChestExportResult {
++  return Object.freeze({ ok: false, error: Object.freeze(error) })
++}
++
++/** Freeze one plugin entry before it crosses the service boundary. */
++function freezePlugin(entry: ChestPluginEntry): ChestPluginEntry {
++  return Object.freeze({ ...entry })
++}
++
++/** Freeze one skill entry before it crosses the service boundary. */
++function freezeSkill(entry: ChestSkillEntry): ChestSkillEntry {
++  return Object.freeze({ ...entry })
++}
++
++/** Freeze a profile view with its bundle list. */
++function freezeProfile(profile: ChestSnapshot['profile']): ChestSnapshot['profile'] {
++  return profile === null ? null : Object.freeze({ ...profile, bundles: Object.freeze([...profile.bundles]) })
++}
++
++/** Freeze a whole snapshot. */
++function freezeSnapshot(snapshot: ChestSnapshot): ChestSnapshot {
++  return Object.freeze({
++    plugins: Object.freeze(snapshot.plugins.map(freezePlugin)),
++    skills: Object.freeze(snapshot.skills.map(freezeSkill)),
++    profile: freezeProfile(snapshot.profile),
++    pluginRoot: snapshot.pluginRoot,
++    skillRoot: snapshot.skillRoot,
++    restartRequired: snapshot.restartRequired,
++  })
++}
++
++/** Freeze one export bundle. */
++function freezeBundle(bundle: ChestBundle): ChestBundle {
++  return Object.freeze({ ...bundle, files: Object.freeze(bundle.files.map(file => Object.freeze({ ...file }))) })
++}
++
++/**
++ * Remote-only service owning the chest: the plugin store, the registered
++ * external plugin folders, the user skill root, and the profile edits that make
++ * an installed plugin real.
++ */
++export class PluginShelfGateway extends TypertRemoteService {
++  static Config: s<Config> = s.object({
++    root: s.string().default(dshHomePath('chest')),
++    skillRoot: s.string().default(dshHomePath('skills')),
++  })
++
++  private readonly layout: ChestLayout
++  private state: ChestState = emptyChestState()
++  private notifyTimer: ReturnType<typeof setTimeout> | undefined = undefined
++  private mutationTail: Promise<unknown> = Promise.resolve()
++  private mutationAdmissionOpen = true
++
++  /**
++   * @param ctx - Host context.
++   * @param config - Deployment configuration (chest root and skill root).
++   */
++  constructor(ctx: Context, config: Config) {
++    super(ctx, 'pluginShelf')
++    this.layout = {
++      root: resolve(config.root),
++      plugins: join(resolve(config.root), 'plugins'),
++      skills: resolve(config.skillRoot),
++    }
++  }
++
++  /** Create the chest roots, adopt boot bookkeeping, then watch them. */
++  protected async [Service.init](): Promise<void> {
++    await mkdir(this.layout.plugins, { recursive: true })
++    await mkdir(this.layout.skills, { recursive: true })
++    const stored = await readChestState(this.layout.root)
++    // A flag written before this boot describes a profile the running process
++    // has just loaded, so booting is exactly what clears it.
++    this.state = { ...stored, restartRequired: false }
++    if (stored.restartRequired) await writeChestState(this.layout.root, this.state)
++
++    const watched = [this.layout.plugins, this.layout.skills, this.layout.root]
++    const profileRoot = profileRootOf(this.ctx.baseUrl)
++    if (profileRoot !== null) watched.push(join(profileRoot, 'package.json'))
++    const watcher = chokidarWatch(watched, {
++      ignoreInitial: true,
++      awaitWriteFinish: { stabilityThreshold: 120, pollInterval: 40 },
++      depth: 2,
++    })
++    const onEvent = (path: string): void => {
++      if (path.endsWith('.tmp')) return
++      this.scheduleNotify()
++    }
++    watcher.on('add', onEvent)
++    watcher.on('change', onEvent)
++    watcher.on('unlink', onEvent)
++    watcher.on('addDir', onEvent)
++    watcher.on('unlinkDir', onEvent)
++    watcher.on('error', (error: unknown) => {
++      this.ctx.logger.warn('chest: watcher error: %o', error)
++    })
++    this.ctx.effect(() => async () => {
++      if (this.notifyTimer !== undefined) clearTimeout(this.notifyTimer)
++      this.mutationAdmissionOpen = false
++      await watcher.close().catch(() => undefined)
++    }, 'plugin-shelf.watcher')
++  }
++
++  /**
++   * The whole chest: plugins, skills, the booted profile, and any pending restart.
++   * @returns The whole chest listing, scanned afresh.
++   */
++  @Remote('list')
++  async list(): Promise<ChestSnapshot> {
++    return this.snapshot()
++  }
++
++  /**
++   * Register a plugin package with the chest: a folder the user points at (the
++   * chest records it in place), or a `.chest` document received from elsewhere
++   * (the chest copies it into its own store).
++   * @param request - a folder path to register in place, or a bundle to adopt.
++   * @returns The settled outcome, carrying the fresh listing on success.
++   */
++  @Remote('importPlugin')
++  importPlugin(request: ChestPluginRequest): Promise<ChestResult> {
++    return this.mutate(async () => {
++      const bundle = request.bundle
++      if (bundle !== undefined) {
++        const validated = asChestBundle(bundle)
++        if (validated === null || validated.kind !== 'plugin') {
++          return { code: 'invalid-bundle', message: 'this file is not a plugin chest bundle' }
++        }
++        return this.adoptPluginBundle(validated)
++      }
++      const raw = request.path?.trim() ?? ''
++      if (raw.length === 0) {
++        return { code: 'invalid-input', message: 'a folder path or a chest bundle is required' }
++      }
++      const source = resolve(raw)
++      const manifest = await readPluginManifest(source)
++      if (manifest === null) {
++        return {
++          code: 'unsupported-package',
++          message: `${source} holds no readable plugin package.json with a name`,
++        }
++      }
++      const already = await this.findPluginByPath(source)
++      if (already !== null) {
++        return { code: 'duplicate-id', message: `${manifest.packageName} is already in the chest as ${already.id}` }
++      }
++      const id = await this.freePluginId(slugOf(basename(source)))
++      this.state = { ...this.state, external: { ...this.state.external, [id]: source } }
++      await writeChestState(this.layout.root, this.state)
++      return null
++    })
++  }
++
++  /**
++   * Author one new skill under the user skill root.
++   * @param draft - the authored skill fields.
++   * @returns The settled outcome, carrying the fresh listing on success.
++   */
++  @Remote('createSkill')
++  createSkill(draft: ChestSkillDraft): Promise<ChestResult> {
++    return this.mutate(async () => {
++      const invalid = validateDraft(draft)
++      if (invalid !== null) return invalid
++      const id = slugOf(draft.name)
++      if ((await this.findSkill(id)) !== null) {
++        return { code: 'duplicate-id', message: `a skill named "${draft.name}" already exists (${id})` }
++      }
++      try {
++        await writeSkill(this.layout.skills, id, draft)
++      } catch (error) {
++        return { code: 'io', message: `failed to write the skill: ${String(error)}` }
++      }
++      this.state = { ...this.state, skillOrder: [...this.state.skillOrder, id] }
++      await writeChestState(this.layout.root, this.state)
++      return null
++    })
++  }
++
++  /**
++   * Adopt one skill bundle received from another chest.
++   * @param bundle - a skill `.chest` document received from another chest.
++   * @returns The settled outcome, carrying the fresh listing on success.
++   */
++  @Remote('importSkill')
++  importSkill(bundle: ChestBundle): Promise<ChestResult> {
++    return this.mutate(async () => {
++      const validated = asChestBundle(bundle)
++      if (validated === null || validated.kind !== 'skill') {
++        return { code: 'invalid-bundle', message: 'this file is not a skill chest bundle' }
++      }
++      const id = slugOf(validated.id)
++      if ((await this.findSkill(id)) !== null) {
++        return { code: 'duplicate-id', message: `a skill named "${validated.name}" already exists (${id})` }
++      }
++      const directoryEntry = validated.files.some(file => safeRelativePath(file.path) === SKILL_FILE_NAME)
++      try {
++        if (directoryEntry) await writeBundleFiles(join(this.layout.skills, id), validated.files)
++        else await this.writeFlatSkillBundle(id, validated)
++      } catch (error) {
++        return { code: 'invalid-bundle', message: `failed to unpack the skill bundle: ${String(error)}` }
++      }
++      if ((await this.findSkill(id)) === null) {
++        await rm(join(this.layout.skills, id), { recursive: true, force: true }).catch(() => undefined)
++        await rm(join(this.layout.skills, `${id}.md`), { force: true }).catch(() => undefined)
++        return { code: 'invalid-bundle', message: 'the bundle holds no readable skill frontmatter' }
++      }
++      this.state = { ...this.state, skillOrder: [...this.state.skillOrder, id] }
++      await writeChestState(this.layout.root, this.state)
++      return null
++    })
++  }
++
++  /** Write one flat single-file skill bundle as `<id>.md`. */
++  private async writeFlatSkillBundle(id: string, bundle: ChestBundle): Promise<void> {
++    const single = bundle.files.length === 1 ? bundle.files[0] : undefined
++    if (single === undefined || !single.path.toLowerCase().endsWith('.md')) {
++      throw new Error('a skill bundle holds either SKILL.md or one markdown file')
++    }
++    const body = single.encoding === 'utf8'
++      ? single.content
++      : Buffer.from(single.content, 'base64').toString('utf8')
++    await writeFile(join(this.layout.skills, `${id}.md`), body, 'utf8')
++  }
++
++  /**
++   * Rewrite one skill in place, keeping the shape the scan found.
++   * @param id - the target skill id.
++   * @param draft - the authored fields that replace the current ones.
++   * @returns The settled outcome, carrying the fresh listing on success.
++   */
++  @Remote('updateSkill')
++  updateSkill(id: string, draft: ChestSkillDraft): Promise<ChestResult> {
++    return this.mutate(async () => {
++      const record = await this.findSkill(id)
++      if (record === null) return { code: 'not-found', message: `skill "${id}" is not in the chest` }
++      const invalid = validateDraft(draft)
++      if (invalid !== null) return invalid
++      try {
++        await writeSkill(this.layout.skills, id, draft, record.flat)
++      } catch (error) {
++        return { code: 'io', message: `failed to write the skill: ${String(error)}` }
++      }
++      return null
++    })
++  }
++
++  /**
++   * Remove one skill: its directory bundle, or its flat markdown file.
++   * @param id - the target skill id.
++   * @returns The settled outcome, carrying the fresh listing on success.
++   */
++  @Remote('deleteSkill')
++  deleteSkill(id: string): Promise<ChestResult> {
++    return this.mutate(async () => {
++      const record = await this.findSkill(id)
++      if (record === null) return { code: 'not-found', message: `skill "${id}" is not in the chest` }
++      try {
++        await removeSkill(this.layout.skills, record)
++      } catch (error) {
++        return { code: 'io', message: `failed to remove the skill: ${String(error)}` }
++      }
++      this.state = { ...this.state, skillOrder: this.state.skillOrder.filter(item => item !== id) }
++      await writeChestState(this.layout.root, this.state)
++      return null
++    })
++  }
++
++  /**
++   * Apply a chest skill order. Skills have no composition order; this is the listing's.
++   * @param ids - every skill id, in the wanted order.
++   * @returns The settled outcome, carrying the fresh listing on success.
++   */
++  @Remote('reorderSkills')
++  reorderSkills(ids: readonly string[]): Promise<ChestResult> {
++    return this.mutate(async () => {
++      const current = (await listSkills(this.layout.skills)).map(record => record.id)
++      if (ids.length !== current.length || ids.some(id => !current.includes(id))) {
++        return { code: 'invalid-input', message: 'the reorder list must name every skill in the chest exactly once' }
++      }
++      this.state = { ...this.state, skillOrder: [...ids] }
++      await writeChestState(this.layout.root, this.state)
++      return null
++    })
++  }
++
++  /**
++   * Install one registered plugin into the booted profile (a restart applies it).
++   * @param id - the chest plugin id.
++   * @returns The settled outcome, carrying the fresh listing on success.
++   */
++  @Remote('installPlugin')
++  installPlugin(id: string): Promise<ChestResult> {
++    return this.mutate(async () => {
++      const entry = await this.findPlugin(id)
++      if (entry === null) return { code: 'not-found', message: `plugin "${id}" is not in the chest` }
++      if (!entry.hasPatch) {
++        return {
++          code: 'unsupported-package',
++          message: `${entry.packageName} declares no dsh.bundle.patch, so it cannot be installed as a bundle layer`,
++        }
++      }
++      const profileRoot = this.profileRoot()
++      if (profileRoot === null) {
++        return { code: 'profile-unavailable', message: 'the running host did not report a profile directory' }
++      }
++      try {
++        if (await installIntoProfile(profileRoot, entry.packageName, entry.path)) {
++          this.state = { ...this.state, restartRequired: true }
++        }
++        await writeChestState(this.layout.root, this.state)
++      } catch (error) {
++        return { code: 'io', message: `failed to install ${entry.packageName}: ${String(error)}` }
++      }
++      return null
++    })
++  }
++
++  /**
++   * Remove one plugin from the profile: dependency, bundle layer, and link.
++   * @param id - the chest plugin id.
++   * @returns The settled outcome, carrying the fresh listing on success.
++   */
++  @Remote('uninstallPlugin')
++  uninstallPlugin(id: string): Promise<ChestResult> {
++    return this.mutate(async () => {
++      const entry = await this.findPlugin(id)
++      if (entry === null) return { code: 'not-found', message: `plugin "${id}" is not in the chest` }
++      if (!entry.installed) return null
++      const profileRoot = this.profileRoot()
++      if (profileRoot === null) {
++        return { code: 'profile-unavailable', message: 'the running host did not report a profile directory' }
++      }
++      try {
++        if (await uninstallFromProfile(profileRoot, entry.packageName)) {
++          this.state = { ...this.state, restartRequired: true }
++        }
++        await writeChestState(this.layout.root, this.state)
++      } catch (error) {
++        return { code: 'io', message: `failed to uninstall ${entry.packageName}: ${String(error)}` }
++      }
++      return null
++    })
++  }
++
++  /**
++   * Drop one plugin from the chest, uninstalling it first when it is installed.
++   * A store plugin's bytes go with it; an external registration leaves the
++   * folder alone, because the chest never owned those files.
++   * @param id - the chest plugin id.
++   * @returns The settled outcome, carrying the fresh listing on success.
++   */
++  @Remote('deletePlugin')
++  deletePlugin(id: string): Promise<ChestResult> {
++    return this.mutate(async () => {
++      const entry = await this.findPlugin(id)
++      if (entry === null) return { code: 'not-found', message: `plugin "${id}" is not in the chest` }
++      const profileRoot = this.profileRoot()
++      if (entry.installed && profileRoot !== null) {
++        try {
++          if (await uninstallFromProfile(profileRoot, entry.packageName)) {
++            this.state = { ...this.state, restartRequired: true }
++          }
++        } catch (error) {
++          return { code: 'io', message: `failed to uninstall ${entry.packageName}: ${String(error)}` }
++        }
++      }
++      if (entry.origin === 'store') {
++        await rm(join(this.layout.plugins, entry.id), { recursive: true, force: true })
++      } else {
++        const remaining: Record<string, string> = {}
++        for (const [key, value] of Object.entries(this.state.external)) {
++          if (key !== id) remaining[key] = value
++        }
++        this.state = { ...this.state, external: remaining }
++      }
++      this.state = { ...this.state, pluginOrder: this.state.pluginOrder.filter(item => item !== id) }
++      await writeChestState(this.layout.root, this.state)
++      return null
++    })
++  }
++
++  /**
++   * Apply a chest plugin order. Order among installed plugins IS the profile's
++   * bundle layer order, so this can be a real precedence change.
++   * @param ids - every plugin id, in the wanted order.
++   * @returns The settled outcome, carrying the fresh listing on success.
++   */
++  @Remote('reorderPlugins')
++  reorderPlugins(ids: readonly string[]): Promise<ChestResult> {
++    return this.mutate(async () => {
++      const entries = await this.pluginEntries()
++      const current = entries.map(entry => entry.id)
++      if (ids.length !== current.length || ids.some(id => !current.includes(id))) {
++        return { code: 'invalid-input', message: 'the reorder list must name every plugin in the chest exactly once' }
++      }
++      const installedOrder = ids
++        .map(id => entries.find(entry => entry.id === id && entry.installed))
++        .filter((entry): entry is ChestPluginEntry => entry !== undefined)
++        .map(entry => entry.packageName)
++      const profileRoot = this.profileRoot()
++      let restartRequired = this.state.restartRequired
++      if (installedOrder.length > 1 && profileRoot !== null) {
++        try {
++          if (await reorderBundles(profileRoot, installedOrder)) restartRequired = true
++        } catch (error) {
++          return { code: 'io', message: `failed to reorder bundle layers: ${String(error)}` }
++        }
++      }
++      this.state = { ...this.state, pluginOrder: [...ids], restartRequired }
++      await writeChestState(this.layout.root, this.state)
++      return null
++    })
++  }
++
++  /**
++   * Pack one plugin package into a shareable `.chest` document.
++   * @param id - the chest plugin id.
++   * @returns The packed bundle, or a business failure.
++   */
++  @Remote('exportPlugin')
++  exportPlugin(id: string): Promise<ChestExportResult> {
++    return this.exportArtifact(async () => {
++      const entry = await this.findPlugin(id)
++      if (entry === null) return { code: 'not-found', message: `plugin "${id}" is not in the chest` }
++      const files = await listTreeFiles(entry.path)
++      if (files.length === 0) return { code: 'io', message: `${entry.packageName} holds no readable files` }
++      if (files.length > MAX_BUNDLE_FILES) {
++        return { code: 'io', message: `${entry.packageName} holds ${files.length} files, too many to share` }
++      }
++      const encoded = await readTreeFiles(entry.path, files)
++      if (encoded === null) return { code: 'io', message: `${entry.packageName} exceeds the chest bundle ceilings` }
++      return freezeBundle({
++        format: 'dsh-chest',
++        revision: 1,
++        kind: 'plugin',
++        id: entry.id,
++        name: entry.packageName,
++        description: entry.description,
++        createdAt: Date.now(),
++        files: encoded,
++      })
++    })
++  }
++
++  /**
++   * Pack one skill (entry file plus its resources) into a shareable `.chest` document.
++   * @param id - the chest skill id.
++   * @returns The packed bundle, or a business failure.
++   */
++  @Remote('exportSkill')
++  exportSkill(id: string): Promise<ChestExportResult> {
++    return this.exportArtifact(async () => {
++      const record = await this.findSkill(id)
++      if (record === null) return { code: 'not-found', message: `skill "${id}" is not in the chest` }
++      const root = record.flat ? this.layout.skills : record.directory
++      const files = record.flat ? [`${record.id}.md`] : await listTreeFiles(record.directory)
++      const encoded = await readTreeFiles(root, files)
++      if (encoded === null) return { code: 'io', message: `${record.name} exceeds the chest bundle ceilings` }
++      return freezeBundle({
++        format: 'dsh-chest',
++        revision: 1,
++        kind: 'skill',
++        id: record.id,
++        name: record.name,
++        description: record.description,
++        createdAt: Date.now(),
++        files: encoded,
++      })
++    })
++  }
++
++  /** Adopt one imported plugin bundle into the store, leaving no trace on failure. */
++  private async adoptPluginBundle(bundle: ChestBundle): Promise<ChestFailure | null> {
++    const id = slugOf(bundle.id)
++    const target = join(this.layout.plugins, id)
++    if (await exists(target)) {
++      return { code: 'duplicate-id', message: `the chest already holds a plugin folder named ${id}` }
++    }
++    try {
++      await writeBundleFiles(target, bundle.files)
++    } catch (error) {
++      return { code: 'invalid-bundle', message: `failed to unpack the bundle: ${String(error)}` }
++    }
++    if ((await readPluginManifest(target)) === null) {
++      await rm(target, { recursive: true, force: true }).catch(() => undefined)
++      return { code: 'invalid-bundle', message: 'the bundle holds no readable plugin package.json' }
++    }
++    this.state = { ...this.state, pluginOrder: [...this.state.pluginOrder, id] }
++    await writeChestState(this.layout.root, this.state)
++    return null
++  }
++
++  /** The profile directory the running host booted from, or null. */
++  private profileRoot(): string | null {
++    return profileRootOf(this.ctx.baseUrl)
++  }
++
++  /** Serialize one mutation behind the previous one, then answer with a fresh listing. */
++  private mutate(operation: () => Promise<ChestFailure | null>): Promise<ChestResult> {
++    return this.enqueue(async () => {
++      let failure: ChestFailure | null
++      try {
++        failure = await operation()
++      } catch (error) {
++        failure = { code: 'io', message: String(error) }
++      }
++      if (failure !== null) return rejected(failure)
++      this.notifyChange()
++      return success(await this.snapshot())
++    })
++  }
++
++  /** Serialize one export behind the mutation queue. */
++  private exportArtifact(operation: () => Promise<ChestBundle | ChestFailure>): Promise<ChestExportResult> {
++    return this.enqueue(async () => {
++      let outcome: ChestBundle | ChestFailure
++      try {
++        outcome = await operation()
++      } catch (error) {
++        return rejectedExport({ code: 'io', message: String(error) })
++      }
++      return 'format' in outcome
++        ? Object.freeze({ ok: true, value: freezeBundle(outcome) })
++        : rejectedExport(outcome)
++    })
++  }
++
++  /** Serialize one operation behind the previous one; rejects while disposing. */
++  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
++    if (!this.mutationAdmissionOpen) {
++      return Promise.reject(new Error('plugin-shelf: service is disposing'))
++    }
++    const previous = this.mutationTail
++    const result = previous.then(operation)
++    const tail = result.then(() => undefined, () => undefined)
++    this.mutationTail = tail
++    return result
++  }
++
++  /** Debounced change notification; a burst of writes settles into one emit. */
++  private scheduleNotify(): void {
++    if (this.notifyTimer !== undefined) clearTimeout(this.notifyTimer)
++    this.notifyTimer = setTimeout(() => {
++      this.notifyTimer = undefined
++      this.notifyChange()
++    }, NOTIFY_DEBOUNCE_MS)
++  }
++
++  /** Notify every observer without making UI refresh load-bearing. */
++  private notifyChange(): void {
++    for (const callback of this.ctx.events.dispatch('emit', ['pluginShelf/change'])) {
++      try {
++        void Promise.resolve(callback()).catch((error: unknown) => {
++          this.ctx.logger.warn(`pluginShelf/change listener rejected: ${String(error)}`)
++        })
++      } catch (error: unknown) {
++        this.ctx.logger.warn(`pluginShelf/change listener threw: ${String(error)}`)
++      }
++    }
++  }
++
++  /** Compose the whole chest listing afresh. */
++  private async snapshot(): Promise<ChestSnapshot> {
++    const profileRoot = this.profileRoot()
++    const profile = profileRoot === null ? null : await readProfile(profileRoot)
++    return freezeSnapshot({
++      plugins: await this.pluginEntries(),
++      skills: await this.skillEntries(),
++      profile: profile === null ? null : { name: profile.name, root: profile.root, bundles: profile.bundles },
++      pluginRoot: this.layout.plugins,
++      skillRoot: this.layout.skills,
++      restartRequired: this.state.restartRequired,
++    })
++  }
++
++  /**
++   * Scan the store and the registered external folders, in chest order, each
++   * entry carrying whether the booted profile lists it as an installed bundle.
++   */
++  private async pluginEntries(): Promise<ChestPluginEntry[]> {
++    const profileRoot = this.profileRoot()
++    const profile = profileRoot === null ? null : await readProfile(profileRoot)
++    const installedBundles = new Set(profile?.bundles ?? [])
++    const found: ChestPluginEntry[] = []
++    let dirents: Dirent[] = []
++    try {
++      dirents = await readdir(this.layout.plugins, { withFileTypes: true })
++    } catch {
++      dirents = []
++    }
++    for (const dirent of dirents) {
++      if (!dirent.isDirectory() || dirent.name.startsWith('.')) continue
++      const path = join(this.layout.plugins, dirent.name)
++      const entry = await this.pluginEntry(dirent.name, path, 'store')
++      if (entry !== null) found.push(entry)
++    }
++    for (const [id, path] of Object.entries(this.state.external)) {
++      const entry = await this.pluginEntry(id, path, 'external')
++      if (entry !== null) found.push(entry)
++    }
++    const ordered = applyOrder(found.map(entry => entry.id), this.state.pluginOrder)
++    const byId = new Map(found.map(entry => [entry.id, entry]))
++    return ordered
++      .map(id => byId.get(id))
++      .filter((entry): entry is ChestPluginEntry => entry !== undefined)
++      .map(entry => ({ ...entry, installed: installedBundles.has(entry.packageName) }))
++  }
++
++  /** Read one plugin directory into an entry, or null when it is not a package. */
++  private async pluginEntry(
++    id: string,
++    path: string,
++    origin: 'store' | 'external',
++  ): Promise<ChestPluginEntry | null> {
++    const manifest = await readPluginManifest(path)
++    if (manifest === null) return null
++    return {
++      id,
++      packageName: manifest.packageName,
++      version: manifest.version,
++      description: manifest.description,
++      path,
++      origin,
++      installed: false,
++      hasPatch: manifest.hasPatch,
++      hasClient: manifest.hasClient,
++    }
++  }
++
++  /** Scan the skill root, in chest order. */
++  private async skillEntries(): Promise<ChestSkillEntry[]> {
++    const records = await listSkills(this.layout.skills)
++    const ordered = applyOrder(records.map(record => record.id), this.state.skillOrder)
++    const byId = new Map(records.map(record => [record.id, record]))
++    const skills: ChestSkillEntry[] = []
++    for (const id of ordered) {
++      const record = byId.get(id)
++      if (record === undefined) continue
++      skills.push({
++        id: record.id,
++        name: record.name,
++        description: record.description,
++        ...(record.whenToUse === undefined ? {} : { whenToUse: record.whenToUse }),
++        path: record.path,
++        directory: record.directory,
++        userOnly: record.userOnly,
++        files: record.files,
++        body: record.body,
++      })
++    }
++    return skills
++  }
++
++  /** Find one plugin entry by chest id. */
++  private async findPlugin(id: string): Promise<ChestPluginEntry | null> {
++    return (await this.pluginEntries()).find(entry => entry.id === id) ?? null
++  }
++
++  /** Find one plugin entry already registered at a path. */
++  private async findPluginByPath(path: string): Promise<ChestPluginEntry | null> {
++    const wanted = resolve(path)
++    return (await this.pluginEntries()).find(entry => resolve(entry.path) === wanted) ?? null
++  }
++
++  /** Find one skill by chest id. */
++  private async findSkill(id: string): Promise<SkillRecord | null> {
++    return (await listSkills(this.layout.skills)).find(record => record.id === id) ?? null
++  }
++
++  /** A store id that no plugin currently uses. */
++  private async freePluginId(preferred: string): Promise<string> {
++    const taken = new Set((await this.pluginEntries()).map(entry => entry.id))
++    if (!taken.has(preferred)) return preferred
++    for (let suffix = 2; suffix < 1000; suffix += 1) {
++      const candidate = `${preferred}-${suffix}`
++      if (!taken.has(candidate)) return candidate
++    }
++    return `${preferred}-${Date.now()}`
++  }
++}
++
++/** Validate one authored skill draft; returns a failure or null. */
++function validateDraft(draft: ChestSkillDraft): ChestFailure | null {
++  if (draft.name.trim().length === 0) return { code: 'invalid-input', message: 'name is required' }
++  if (draft.description.trim().length === 0) {
++    return { code: 'invalid-input', message: 'description is required: the skill catalog shows it' }
++  }
++  return null
++}
++
++export default PluginShelfGateway
+diff --git a/packages/host/plugin-shelf/src/invariant.ts b/packages/host/plugin-shelf/src/invariant.ts
+new file mode 100644
+index 0000000..13353fb
+--- /dev/null
++++ b/packages/host/plugin-shelf/src/invariant.ts
+@@ -0,0 +1,24 @@
++/** Package-owned invariant companion. @module @deepseek-ai/dsh-host-plugin-shelf/invariant */
++
++/* jscpd:ignore-start */
++import type { Context } from '@deepseek-ai/cordis'
++import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
++
++const PACKAGE_NAME = '@deepseek-ai/dsh-host-plugin-shelf'
++
++/** Cordis companion plugin name. */
++export const name = 'host-plugin-shelf-invariant'
++/** Service required before the companion can reserve package ownership. */
++export const inject = ['invariants']
++
++/**
++ * No runtime invariant: every listing is scanned directly from the plugin store,
++ * the registered external folders, the skill root, and the booted profile, and
++ * one serialized queue owns every mutation.
++ */
++const install: InvariantInstaller = () => {}
++
++/** Register this package's invariant companion. */
++export const apply = (ctx: Context): Promise<() => void> =>
++  Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
++/* jscpd:ignore-end */
+diff --git a/packages/host/plugin-shelf/src/plugins.ts b/packages/host/plugin-shelf/src/plugins.ts
+new file mode 100644
+index 0000000..66e7f82
+--- /dev/null
++++ b/packages/host/plugin-shelf/src/plugins.ts
+@@ -0,0 +1,238 @@
++/**
++ * Plugin-package mechanics for the chest: read a package manifest, walk and
++ * copy a package tree, and pack or unpack the single-file bundle a chest
++ * shares. Everything here is filesystem work on ONE directory, so the gateway
++ * above stays about policy rather than about `Dirent`s.
++ *
++ * @module @deepseek-ai/dsh-host-plugin-shelf/plugins
++ */
++
++import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
++import { dirname, join, relative, resolve, sep } from 'node:path'
++import type { ChestBundle, ChestBundleFile } from './types.ts'
++
++/** Directory names never copied into or out of a chest artifact. */
++const SKIPPED_SEGMENTS: ReadonlySet<string> = new Set(['node_modules', '.git'])
++
++/** Bundle-size ceilings; a chest artifact is a plugin or a skill, not a tree dump. */
++const MAX_BUNDLE_FILES = 2000
++const MAX_BUNDLE_FILE_BYTES = 8 * 1024 * 1024
++
++/** What a plugin package's `package.json` tells the chest. */
++export interface PluginManifest {
++  /** Package name; the Loader resolves this, so it is the row identity too. */
++  readonly packageName: string
++  /** Declared version, empty when the manifest omits one. */
++  readonly version: string
++  /** Declared description, empty when the manifest omits one. */
++  readonly description: string
++  /** Whether the package ships a Loader patch layer (`dsh.bundle.patch`). */
++  readonly hasPatch: boolean
++  /** Whether the package ships a web browser half (`dsh.client.platform: web`). */
++  readonly hasClient: boolean
++}
++
++/** Narrow a parsed value to a plain record, or null when it is not one. */
++function recordOf(value: unknown): Record<string, unknown> | null {
++  return typeof value === 'object' && value !== null && !Array.isArray(value)
++    ? value as Record<string, unknown>
++    : null
++}
++
++/** Read one string field, trimming it; empty string when absent or not a string. */
++function textOf(record: Record<string, unknown>, key: string): string {
++  const value = record[key]
++  return typeof value === 'string' ? value.trim() : ''
++}
++
++/**
++ * Read a plugin package's manifest.
++ * @param directory - the candidate package directory.
++ * @returns the manifest facts, or null when the folder is not a plugin package.
++ */
++export async function readPluginManifest(directory: string): Promise<PluginManifest | null> {
++  let parsed: unknown
++  try {
++    parsed = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8')) as unknown
++  } catch {
++    return null
++  }
++  const record = recordOf(parsed)
++  if (record === null) return null
++  const packageName = textOf(record, 'name')
++  if (packageName.length === 0) return null
++  const dsh = recordOf(record.dsh)
++  const bundle = dsh === null ? null : recordOf(dsh.bundle)
++  const client = dsh === null ? null : recordOf(dsh.client)
++  return {
++    packageName,
++    version: textOf(record, 'version'),
++    description: textOf(record, 'description'),
++    hasPatch: bundle !== null && typeof bundle.patch === 'string' && bundle.patch.trim().length > 0,
++    // The browser roster scanner refuses a declared client half that is not
++    // for the web platform, so only a web declaration counts here.
++    hasClient: client !== null && client.platform === 'web',
++  }
++}
++
++/** Whether one directory entry name is a directory the chest should descend into. */
++function descendsInto(name: string): boolean {
++  return !SKIPPED_SEGMENTS.has(name) && !name.startsWith('.')
++}
++
++/**
++ * List every regular file under a directory, as forward-slashed relative paths.
++ * @param root - the directory to walk.
++ * @returns sorted relative paths, or an empty list when the root is unreadable.
++ */
++export async function listTreeFiles(root: string): Promise<string[]> {
++  const found: string[] = []
++  const walk = async (current: string): Promise<void> => {
++    let entries
++    try {
++      entries = await readdir(current, { withFileTypes: true })
++    } catch {
++      return
++    }
++    for (const entry of entries) {
++      if (!descendsInto(entry.name)) continue
++      const full = join(current, entry.name)
++      if (entry.isDirectory()) {
++        await walk(full)
++        continue
++      }
++      if (!entry.isFile()) continue
++      const rel = relative(root, full)
++      found.push(rel.split(sep).join('/'))
++    }
++  }
++  await walk(root)
++  return found.sort((left, right) => left.localeCompare(right))
++}
++
++/** Encode one file body, preferring readable UTF-8 and falling back to base64. */
++function encodeBody(body: Buffer): ChestBundleFile['encoding'] {
++  return Buffer.from(body.toString('utf8'), 'utf8').equals(body) ? 'utf8' : 'base64'
++}
++
++/**
++ * Read a directory into bundle files.
++ * @param root - the artifact directory.
++ * @param files - relative paths to read (from {@link listTreeFiles}).
++ * @returns the encoded files, or null when the artifact exceeds the ceilings.
++ */
++export async function readTreeFiles(
++  root: string,
++  files: readonly string[],
++): Promise<ChestBundleFile[] | null> {
++  if (files.length > MAX_BUNDLE_FILES) return null
++  const collected: ChestBundleFile[] = []
++  for (const rel of files) {
++    const body = await readFile(join(root, rel))
++    if (body.byteLength > MAX_BUNDLE_FILE_BYTES) return null
++    const encoding = encodeBody(body)
++    collected.push({
++      path: rel,
++      encoding,
++      content: encoding === 'utf8' ? body.toString('utf8') : body.toString('base64'),
++    })
++  }
++  return collected
++}
++
++/**
++ * Normalize a bundle-relative path, refusing anything that could escape the target.
++ * @param raw - the path as written in the bundle.
++ * @returns the normalized forward-slashed path, or null when it is unsafe.
++ */
++export function safeRelativePath(raw: string): string | null {
++  const normalized = raw.replace(/\\/g, '/')
++  if (normalized.length === 0 || normalized.startsWith('/')) return null
++  if (/^[a-zA-Z]:/.test(normalized)) return null
++  const segments = normalized.split('/').filter(segment => segment.length > 0 && segment !== '.')
++  if (segments.length === 0) return null
++  if (segments.some(segment => segment === '..' || SKIPPED_SEGMENTS.has(segment))) return null
++  return segments.join('/')
++}
++
++/**
++ * Narrow an inbound value to a chest bundle.
++ * @param value - the untrusted value received over the wire.
++ * @returns the bundle, or null when the document is not one this chest can read.
++ */
++export function asChestBundle(value: unknown): ChestBundle | null {
++  const record = recordOf(value)
++  if (record === null) return null
++  if (record.format !== 'dsh-chest' || record.revision !== 1) return null
++  const kind = record.kind
++  if (kind !== 'plugin' && kind !== 'skill') return null
++  if (typeof record.id !== 'string' || record.id.trim().length === 0) return null
++  if (!Array.isArray(record.files)) return null
++  const files: ChestBundleFile[] = []
++  for (const item of record.files) {
++    const file = recordOf(item)
++    if (file === null) return null
++    const path = typeof file.path === 'string' ? file.path : ''
++    const encoding = file.encoding
++    if (encoding !== 'utf8' && encoding !== 'base64') return null
++    if (typeof file.content !== 'string') return null
++    if (safeRelativePath(path) === null) return null
++    files.push({ path, encoding, content: file.content })
++  }
++  if (files.length === 0 || files.length > MAX_BUNDLE_FILES) return null
++  return {
++    format: 'dsh-chest',
++    revision: 1,
++    kind,
++    id: record.id.trim(),
++    name: typeof record.name === 'string' ? record.name : record.id.trim(),
++    description: typeof record.description === 'string' ? record.description : '',
++    createdAt: typeof record.createdAt === 'number' ? record.createdAt : 0,
++    files,
++  }
++}
++
++/**
++ * Write bundle files into a directory that must not yet exist.
++ * @param target - the directory to create and fill.
++ * @param files - the bundle's files, already validated by {@link asChestBundle}.
++ * @returns the number of files written.
++ */
++export async function writeBundleFiles(
++  target: string,
++  files: readonly ChestBundleFile[],
++): Promise<number> {
++  await mkdir(target, { recursive: false })
++  let written = 0
++  try {
++    for (const file of files) {
++      const safe = safeRelativePath(file.path)
++      if (safe === null) throw new Error(`unsafe bundle path: ${file.path}`)
++      const full = resolve(target, safe)
++      if (!full.startsWith(`${resolve(target)}${sep}`)) {
++        throw new Error(`unsafe bundle path: ${file.path}`)
++      }
++      await mkdir(dirname(full), { recursive: true })
++      await writeFile(full, file.encoding === 'utf8' ? file.content : Buffer.from(file.content, 'base64'))
++      written += 1
++    }
++  } catch (error) {
++    await rm(target, { recursive: true, force: true }).catch(() => undefined)
++    throw error
++  }
++  return written
++}
++
++/**
++ * Whether a path already exists.
++ * @param path - the absolute path to test.
++ * @returns True when something is there.
++ */
++export async function exists(path: string): Promise<boolean> {
++  try {
++    await stat(path)
++    return true
++  } catch {
++    return false
++  }
++}
+diff --git a/packages/host/plugin-shelf/src/profile.ts b/packages/host/plugin-shelf/src/profile.ts
+new file mode 100644
+index 0000000..373eb31
+--- /dev/null
++++ b/packages/host/plugin-shelf/src/profile.ts
+@@ -0,0 +1,272 @@
++/**
++ * Profile mechanics for the chest: read the profile the running host booted
++ * from, and install or remove a plugin package there.
++ *
++ * A profile is an ordinary directory (`$DSH_HOME/profiles/<name>`) whose
++ * `package.json` carries `dsh.profile.bundles` — the ordered bundle layers the
++ * Loader composes. Installing a plugin is therefore three concrete edits and
++ * nothing more: a dependency entry pointing at the package, the bundle name in
++ * that ordered list, and the `node_modules` link that lets a bare specifier
++ * resolve to it. Layer order IS precedence, so reordering this list is the real
++ * reordering of a plugin, not a display preference.
++ *
++ * @module @deepseek-ai/dsh-host-plugin-shelf/profile
++ */
++
++import { lstat, mkdir, readFile, readlink, rename, symlink, unlink, writeFile } from 'node:fs/promises'
++import { basename, dirname, join } from 'node:path'
++import { fileURLToPath } from 'node:url'
++
++/** The profile facts the chest reads and writes. */
++export interface ProfileManifest {
++  /** Profile name: its directory name. */
++  readonly name: string
++  /** Absolute profile directory. */
++  readonly root: string
++  /** Bundle package names in patch-layer order. */
++  readonly bundles: readonly string[]
++}
++
++/** A profile package.json parsed far enough to edit it losslessly. */
++interface ProfileDocument {
++  /** The whole manifest, so unknown keys survive a rewrite. */
++  readonly record: Record<string, unknown>
++  /** `dsh.profile` when it is a record, else null. */
++  readonly profile: Record<string, unknown> | null
++}
++
++/** Narrow a parsed value to a plain record, or null when it is not one. */
++function recordOf(value: unknown): Record<string, unknown> | null {
++  return typeof value === 'object' && value !== null && !Array.isArray(value)
++    ? value as Record<string, unknown>
++    : null
++}
++
++/**
++ * Resolve the booted profile directory from the Loader's base URL.
++ * @param baseUrl - the Loader's base URL, absent outside a composed profile.
++ * @returns The absolute profile directory, or null when there is none to read.
++ */
++export function profileRootOf(baseUrl: string | undefined): string | null {
++  if (baseUrl === undefined || baseUrl.length === 0) return null
++  try {
++    return fileURLToPath(baseUrl)
++  } catch {
++    return null
++  }
++}
++
++/** Read and parse a profile manifest document, or null when there is none. */
++async function readDocument(root: string): Promise<ProfileDocument | null> {
++  let parsed: unknown
++  try {
++    parsed = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as unknown
++  } catch {
++    return null
++  }
++  const record = recordOf(parsed)
++  if (record === null) return null
++  const dsh = recordOf(record.dsh)
++  return { record, profile: dsh === null ? null : recordOf(dsh.profile) }
++}
++
++/**
++ * Read a profile's bundle list.
++ * @param root - the candidate profile directory.
++ * @returns The profile manifest, or null when the directory is not a profile.
++ */
++export async function readProfile(root: string): Promise<ProfileManifest | null> {
++  const document = await readDocument(root)
++  if (document === null || document.profile === null) return null
++  const bundles = document.profile.bundles
++  return {
++    name: basename(root),
++    root,
++    bundles: Array.isArray(bundles) ? bundles.filter((item): item is string => typeof item === 'string') : [],
++  }
++}
++
++/** Persist an edited profile document, preserving formatting conventions. */
++async function writeDocument(root: string, document: ProfileDocument): Promise<void> {
++  const target = join(root, 'package.json')
++  const temporary = `${target}.chest.tmp`
++  await writeFile(temporary, `${JSON.stringify(document.record, null, 2)}\n`, 'utf8')
++  await rename(temporary, target)
++}
++
++/** Read the mutable dependency map, creating it when the manifest lacks one. */
++function dependenciesOf(document: ProfileDocument): Record<string, unknown> {
++  const existing = recordOf(document.record.dependencies)
++  if (existing !== null) return existing
++  const created: Record<string, unknown> = {}
++  document.record.dependencies = created
++  return created
++}
++
++/** Read the mutable bundle list, creating `dsh.profile.bundles` when absent. */
++function bundlesOf(document: ProfileDocument): unknown[] {
++  const profile = document.profile
++  if (profile === null) return []
++  const existing = profile.bundles
++  if (Array.isArray(existing)) return existing
++  const created: unknown[] = []
++  profile.bundles = created
++  return created
++}
++
++/**
++ * The specifier a profile dependency uses for a plugin that stays where it is.
++ * @param target - the absolute package directory.
++ * @returns A `link:` specifier with forward slashes, portable in package.json.
++ */
++export function linkSpecifier(target: string): string {
++  return `link:${target.replace(/\\/g, '/')}`
++}
++
++/**
++ * Whether `node_modules/<packageName>` already resolves to `target`.
++ * @param root - the profile directory.
++ * @param packageName - the package name to look up.
++ * @param target - the absolute package directory it should point at.
++ */
++async function linkResolvesTo(root: string, packageName: string, target: string): Promise<boolean> {
++  const linkPath = join(root, 'node_modules', ...packageName.split('/'))
++  try {
++    const stats = await lstat(linkPath)
++    if (!stats.isSymbolicLink()) return false
++    return (await readlink(linkPath)) === target
++  } catch {
++    return false
++  }
++}
++
++/**
++ * Point `node_modules/<packageName>` at a package directory.
++ * @param root - the profile directory.
++ * @param packageName - the package name, scoped names included.
++ * @param target - the absolute package directory.
++ * @returns whether a link was created (false when one already resolved there).
++ */
++export async function linkPackage(root: string, packageName: string, target: string): Promise<boolean> {
++  if (await linkResolvesTo(root, packageName, target)) return false
++  const linkPath = join(root, 'node_modules', ...packageName.split('/'))
++  await mkdir(dirname(linkPath), { recursive: true })
++  // A pre-existing entry (an npm-installed copy, or a stale link) never wins:
++  // the chest's install is the whole point of the call, so replace a link and
++  // leave a real directory alone.
++  try {
++    const stats = await lstat(linkPath)
++    if (!stats.isSymbolicLink()) return false
++    await unlink(linkPath)
++  } catch {
++    // Absent — the symlink below creates it.
++  }
++  await symlink(target, linkPath, 'junction')
++  return true
++}
++
++/**
++ * Remove the `node_modules` link for one package, leaving a real directory alone.
++ * @param root - the profile directory.
++ * @param packageName - the package name to unlink.
++ */
++export async function unlinkPackage(root: string, packageName: string): Promise<void> {
++  const linkPath = join(root, 'node_modules', ...packageName.split('/'))
++  try {
++    const stats = await lstat(linkPath)
++    if (!stats.isSymbolicLink()) return
++    await unlink(linkPath)
++  } catch {
++    // Absent — nothing to remove.
++  }
++}
++
++/**
++ * Record a plugin package as an installed bundle in the profile.
++ * @param root - the profile directory.
++ * @param packageName - the package name.
++ * @param target - the absolute package directory.
++ * @returns whether the manifest changed (false when the profile already agreed).
++ */
++export async function installIntoProfile(
++  root: string,
++  packageName: string,
++  target: string,
++): Promise<boolean> {
++  const document = await readDocument(root)
++  if (document === null || document.profile === null) {
++    throw new Error('profile package.json has no dsh.profile block')
++  }
++  const wanted = linkSpecifier(target)
++  const dependencies = dependenciesOf(document)
++  const bundles = bundlesOf(document)
++  let changed = dependencies[packageName] !== wanted
++  if (changed) dependencies[packageName] = wanted
++  if (!bundles.includes(packageName)) {
++    bundles.push(packageName)
++    changed = true
++  }
++  if (changed) await writeDocument(root, document)
++  await linkPackage(root, packageName, target)
++  return changed
++}
++
++/**
++ * Drop a plugin package from the profile: dependency, bundle list, and link.
++ * @param root - the profile directory.
++ * @param packageName - the package name.
++ * @returns whether the manifest changed.
++ */
++export async function uninstallFromProfile(root: string, packageName: string): Promise<boolean> {
++  const document = await readDocument(root)
++  if (document === null || document.profile === null) {
++    throw new Error('profile package.json has no dsh.profile block')
++  }
++  const dependencies = dependenciesOf(document)
++  const bundles = bundlesOf(document)
++  let changed = false
++  if (packageName in dependencies) {
++    // Rebuilt rather than `delete`d: the repository's lint forbids a dynamic delete.
++    const remainingDependencies: Record<string, unknown> = {}
++    for (const [key, value] of Object.entries(dependencies)) {
++      if (key !== packageName) remainingDependencies[key] = value
++    }
++    document.record.dependencies = remainingDependencies
++    changed = true
++  }
++  const remaining = bundles.filter(item => item !== packageName)
++  if (remaining.length !== bundles.length) {
++    bundles.length = 0
++    bundles.push(...remaining)
++    changed = true
++  }
++  if (changed) await writeDocument(root, document)
++  await unlinkPackage(root, packageName)
++  return changed
++}
++
++/**
++ * Reorder bundle layers among the slots the named bundles already occupy.
++ * @param root - the profile directory.
++ * @param ordered - bundle names in the wanted order.
++ * @returns whether the manifest changed.
++ */
++export async function reorderBundles(root: string, ordered: readonly string[]): Promise<boolean> {
++  const document = await readDocument(root)
++  if (document === null || document.profile === null) return false
++  const bundles = bundlesOf(document)
++  const slots: number[] = []
++  for (const [index, item] of bundles.entries()) {
++    if (typeof item === 'string' && ordered.includes(item)) slots.push(index)
++  }
++  if (slots.length !== ordered.length) return false
++  let changed = false
++  for (const [offset, index] of slots.entries()) {
++    if (bundles[index] !== ordered[offset]) {
++      bundles[index] = ordered[offset]
++      changed = true
++    }
++  }
++  if (changed) await writeDocument(root, document)
++  return changed
++}
+diff --git a/packages/host/plugin-shelf/src/skills.ts b/packages/host/plugin-shelf/src/skills.ts
+new file mode 100644
+index 0000000..ad0baa5
+--- /dev/null
++++ b/packages/host/plugin-shelf/src/skills.ts
+@@ -0,0 +1,207 @@
++/**
++ * Skill-file mechanics for the chest: read and write the `SKILL.md` convention
++ * the harness's own skill provider discovers — YAML frontmatter (`name`,
++ * `description`, `whenToUse`, `disable-model-invocation`) above a markdown body.
++ *
++ * The chest deliberately writes the SAME shape a hand-authored skill has, so a
++ * skill created here is a first-class skill: the `/name` composer reference and
++ * the `skill` tool both find it, and a shared one drops into any skill root.
++ *
++ * @module @deepseek-ai/dsh-host-plugin-shelf/skills
++ */
++
++import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
++import { join } from 'node:path'
++import { parse as parseYaml } from 'yaml'
++import type { ChestSkillDraft } from './types.ts'
++import { listTreeFiles } from './plugins.ts'
++
++/** The entry file name of a directory-bundle skill. */
++export const SKILL_FILE_NAME = 'SKILL.md'
++
++/** One skill parsed off disk, body included (skills are small markdown). */
++export interface SkillRecord {
++  /** Stable id: the directory name, or the file name without extension. */
++  readonly id: string
++  /** Frontmatter `name`. */
++  readonly name: string
++  /** Frontmatter `description`. */
++  readonly description: string
++  /** Frontmatter `whenToUse`, absent when the skill omits it. */
++  readonly whenToUse?: string
++  /** Whether the skill opts out of model invocation. */
++  readonly userOnly: boolean
++  /** Absolute path of the entry file. */
++  readonly path: string
++  /** Absolute path of the containing directory. */
++  readonly directory: string
++  /** Whether the skill is a flat `<id>.md` file rather than a directory bundle. */
++  readonly flat: boolean
++  /** Extra files beside the entry file. */
++  readonly files: number
++  /** Markdown body below the frontmatter. */
++  readonly body: string
++}
++
++/** Narrow a parsed value to a plain record, or null when it is not one. */
++function recordOf(value: unknown): Record<string, unknown> | null {
++  return typeof value === 'object' && value !== null && !Array.isArray(value)
++    ? value as Record<string, unknown>
++    : null
++}
++
++/**
++ * Stable slug from a display name; falls back to `skill` when nothing survives.
++ * @param name - the display name to slug.
++ * @returns A lowercase, dash-joined id safe to use as a directory name.
++ */
++export function slugOf(name: string): string {
++  const slug = name.trim()
++    .toLocaleLowerCase()
++    .replace(/[^\p{L}\p{N}]+/gu, '-')
++    .replace(/^-+|-+$/g, '')
++  return slug.length > 0 ? slug : 'skill'
++}
++
++/**
++ * Parse one skill document.
++ * @param raw - the file body, BOM tolerated.
++ * @returns the parsed skill without its location, or null when it is not a skill.
++ */
++export function parseSkillMarkdown(
++  raw: string,
++): Omit<SkillRecord, 'id' | 'path' | 'directory' | 'flat' | 'files'> | null {
++  const text = raw.replace(/^\uFEFF/, '')
++  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text)
++  if (match === null) return null
++  let meta: unknown
++  try {
++    meta = parseYaml(match[1] ?? '') as unknown
++  } catch {
++    return null
++  }
++  const record = recordOf(meta)
++  if (record === null) return null
++  const name = typeof record.name === 'string' ? record.name.trim() : ''
++  const description = typeof record.description === 'string' ? record.description.trim() : ''
++  if (name.length === 0 || description.length === 0) return null
++  const whenToUse = typeof record.whenToUse === 'string' ? record.whenToUse.trim() : ''
++  return {
++    name,
++    description,
++    ...(whenToUse.length > 0 ? { whenToUse } : {}),
++    userOnly: record['disable-model-invocation'] === true,
++    body: (match[2] ?? '').trim(),
++  }
++}
++
++/**
++ * Render one skill document in the canonical on-disk shape.
++ * @param draft - the authored fields.
++ * @returns the whole file body, frontmatter included.
++ */
++export function renderSkillMarkdown(draft: ChestSkillDraft): string {
++  // JSON.stringify emits a valid YAML double-quoted scalar, so a name holding
++  // a colon, quote, or newline cannot break the frontmatter block.
++  const lines = [
++    '---',
++    `name: ${JSON.stringify(draft.name.trim())}`,
++    `description: ${JSON.stringify(draft.description.trim())}`,
++  ]
++  const whenToUse = draft.whenToUse?.trim() ?? ''
++  if (whenToUse.length > 0) lines.push(`whenToUse: ${JSON.stringify(whenToUse)}`)
++  if (draft.userOnly === true) lines.push('disable-model-invocation: true')
++  lines.push('---', '', draft.body.trim(), '')
++  return lines.join('\n')
++}
++
++/** Read one skill entry file into a record, or null when it is unreadable. */
++async function readSkillAt(
++  entryPath: string,
++  directory: string,
++  id: string,
++  flat: boolean,
++): Promise<SkillRecord | null> {
++  let parsed: ReturnType<typeof parseSkillMarkdown>
++  try {
++    parsed = parseSkillMarkdown(await readFile(entryPath, 'utf8'))
++  } catch {
++    return null
++  }
++  if (parsed === null) return null
++  const files = flat ? 0 : Math.max(0, (await listTreeFiles(directory).catch(() => [])).length - 1)
++  return { id, ...parsed, path: entryPath, directory, flat, files }
++}
++
++/**
++ * Scan a skill root.
++ * @param root - the skill root directory (for example `$DSH_HOME/skills`).
++ * @returns every readable skill, ordered by the id the natural order gives.
++ */
++export async function listSkills(root: string): Promise<SkillRecord[]> {
++  let entries
++  try {
++    entries = await readdir(root, { withFileTypes: true })
++  } catch {
++    return []
++  }
++  const found: SkillRecord[] = []
++  for (const entry of entries) {
++    if (entry.name.startsWith('.')) continue
++    if (entry.isDirectory()) {
++      const record = await readSkillAt(
++        join(root, entry.name, SKILL_FILE_NAME),
++        join(root, entry.name),
++        entry.name,
++        false,
++      )
++      if (record !== null) found.push(record)
++      continue
++    }
++    if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue
++    if (entry.name === SKILL_FILE_NAME) continue
++    const record = await readSkillAt(join(root, entry.name), root, entry.name.slice(0, -3), true)
++    if (record !== null) found.push(record)
++  }
++  return found.sort((left, right) => left.id.localeCompare(right.id))
++}
++
++/**
++ * Write one skill, creating its directory bundle when absent.
++ * @param root - the skill root.
++ * @param id - the target id (already slugged by the caller).
++ * @param draft - the authored fields.
++ * @param flat - write a flat `<id>.md` instead of a directory bundle.
++ * @returns the absolute path written.
++ */
++export async function writeSkill(
++  root: string,
++  id: string,
++  draft: ChestSkillDraft,
++  flat = false,
++): Promise<string> {
++  const body = renderSkillMarkdown(draft)
++  if (flat) {
++    const target = join(root, `${id}.md`)
++    await writeFile(target, body, 'utf8')
++    return target
++  }
++  const directory = join(root, id)
++  await mkdir(directory, { recursive: true })
++  const target = join(directory, SKILL_FILE_NAME)
++  await writeFile(target, body, 'utf8')
++  return target
++}
++
++/**
++ * Remove one skill from the root: its directory bundle, or the flat file.
++ * @param root - the skill root.
++ * @param record - the skill as the scan found it.
++ */
++export async function removeSkill(root: string, record: SkillRecord): Promise<void> {
++  if (record.flat) {
++    await rm(join(root, `${record.id}.md`), { force: true })
++    return
++  }
++  await rm(join(root, record.id), { recursive: true, force: true })
++}
+diff --git a/packages/host/plugin-shelf/src/state.ts b/packages/host/plugin-shelf/src/state.ts
+new file mode 100644
+index 0000000..cb90caa
+--- /dev/null
++++ b/packages/host/plugin-shelf/src/state.ts
+@@ -0,0 +1,111 @@
++/**
++ * Chest bookkeeping: the one small JSON document under the chest root that
++ * records what a directory listing cannot say — which external folders are
++ * registered in place, the user's chosen order per section, and whether a
++ * profile mutation is still waiting for the next restart.
++ *
++ * @module @deepseek-ai/dsh-host-plugin-shelf/state
++ */
++
++import { readFile, rename, writeFile } from 'node:fs/promises'
++import { join } from 'node:path'
++
++/** Bookkeeping file name inside the chest root. */
++export const CHEST_STATE_FILE = 'chest.json'
++
++/** On-disk bookkeeping shape. Everything here is optional on read. */
++export interface ChestState {
++  /** External plugin folders registered in place, by chest id. */
++  readonly external: Record<string, string>
++  /** Plugin ids in presentation order, most significant first. */
++  readonly pluginOrder: readonly string[]
++  /** Skill ids in presentation order, most significant first. */
++  readonly skillOrder: readonly string[]
++  /** True once a profile mutation awaits the next dsh restart. */
++  readonly restartRequired: boolean
++}
++
++/**
++ * The empty bookkeeping document: nothing registered, natural order, nothing pending.
++ * @returns A fresh state value whose sections are all empty.
++ */
++export function emptyChestState(): ChestState {
++  return { external: {}, pluginOrder: [], skillOrder: [], restartRequired: false }
++}
++
++/** Narrow one parsed value to a string map, dropping every non-string pair. */
++function stringMapOf(value: unknown): Record<string, string> {
++  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
++  const result: Record<string, string> = {}
++  for (const [key, entry] of Object.entries(value)) {
++    if (typeof entry === 'string') result[key] = entry
++  }
++  return result
++}
++
++/** Narrow one parsed value to a string list, dropping every non-string item. */
++function stringListOf(value: unknown): string[] {
++  if (!Array.isArray(value)) return []
++  return value.filter((item): item is string => typeof item === 'string')
++}
++
++/**
++ * Read the bookkeeping file, falling back to defaults when it is absent or unreadable.
++ * @param root - the chest root holding `chest.json`.
++ * @returns The stored state, or the empty state when nothing readable is there.
++ */
++export async function readChestState(root: string): Promise<ChestState> {
++  let raw: string
++  try {
++    raw = await readFile(join(root, CHEST_STATE_FILE), 'utf8')
++  } catch {
++    return emptyChestState()
++  }
++  let parsed: unknown
++  try {
++    parsed = JSON.parse(raw) as unknown
++  } catch {
++    return emptyChestState()
++  }
++  if (typeof parsed !== 'object' || parsed === null) return emptyChestState()
++  const record = parsed as Record<string, unknown>
++  return {
++    external: stringMapOf(record.external),
++    pluginOrder: stringListOf(record.pluginOrder),
++    skillOrder: stringListOf(record.skillOrder),
++    restartRequired: record.restartRequired === true,
++  }
++}
++
++/**
++ * Persist the bookkeeping file through a temp rename, so a reader never sees a half write.
++ * @param root - the chest root holding `chest.json`.
++ * @param state - the state to store.
++ */
++export async function writeChestState(root: string, state: ChestState): Promise<void> {
++  const target = join(root, CHEST_STATE_FILE)
++  const temporary = `${target}.tmp`
++  const body = `${JSON.stringify({
++    version: 1,
++    external: state.external,
++    pluginOrder: state.pluginOrder,
++    skillOrder: state.skillOrder,
++    restartRequired: state.restartRequired,
++  }, null, 2)}\n`
++  await writeFile(temporary, body, 'utf8')
++  await rename(temporary, target)
++}
++
++/**
++ * Order ids by a recorded preference: ids the preference names come first in
++ * that order, and ids it does not name keep their natural order behind them.
++ * @param ids - the ids that currently exist.
++ * @param order - the recorded preference, possibly stale.
++ * @returns the ids in presentation order.
++ */
++export function applyOrder(ids: readonly string[], order: readonly string[]): string[] {
++  const known = new Set(ids)
++  const ranked = order.filter(id => known.has(id))
++  const seen = new Set(ranked)
++  return [...ranked, ...ids.filter(id => !seen.has(id))]
++}
+diff --git a/packages/host/plugin-shelf/src/types.ts b/packages/host/plugin-shelf/src/types.ts
+new file mode 100644
+index 0000000..e8fd6cb
+--- /dev/null
++++ b/packages/host/plugin-shelf/src/types.ts
+@@ -0,0 +1,184 @@
++/**
++ * Chest event vocabulary and Remote payload types. Client-safe: nothing here
++ * reaches a Host-only symbol, so a Client compilation face reads the same
++ * `pluginShelf/change` signature the Host emits.
++ *
++ * A chest holds two kinds of thing, both of them real artifacts on disk rather
++ * than text the model is asked to pretend with:
++ *
++ * - **plugin** — a directory holding a DSH plugin package (`package.json`, a
++ *   `cordis.patch.yml` patch layer, and optionally a browser half). The chest
++ *   owns a store of them and can link one into the running profile, which is
++ *   what installing a plugin actually means.
++ * - **skill** — a directory holding `SKILL.md` under the user skill root, the
++ *   same file the `skill` tool and the `/name` composer reference discover.
++ *
++ * @module @deepseek-ai/dsh-host-plugin-shelf/types
++ */
++
++/** Where a registered plugin package lives. */
++export type ChestPluginOrigin =
++  /** Copied into `$DSH_HOME/chest/plugins`, so the chest owns the bytes. */
++  | 'store'
++  /** A folder elsewhere on disk the user registered in place. */
++  | 'external'
++
++/** One plugin package the chest knows about. */
++export interface ChestPluginEntry {
++  /** Stable chest id: the folder name. */
++  readonly id: string
++  /** Package name from its `package.json`. */
++  readonly packageName: string
++  /** Package version, empty when the manifest omits one. */
++  readonly version: string
++  /** Package description, empty when the manifest omits one. */
++  readonly description: string
++  /** Absolute path of the package directory. */
++  readonly path: string
++  /** Whether the chest owns the bytes or merely points at them. */
++  readonly origin: ChestPluginOrigin
++  /** Whether the profile records this package as an installed bundle. */
++  readonly installed: boolean
++  /** Whether the package ships a Loader patch layer (`dsh.bundle.patch`). */
++  readonly hasPatch: boolean
++  /** Whether the package ships a browser half (`dsh.client`, web platform). */
++  readonly hasClient: boolean
++}
++
++/** One skill the chest manages under the user skill root. */
++export interface ChestSkillEntry {
++  /** Stable chest id: the directory (or file) name under the skill root. */
++  readonly id: string
++  /** Frontmatter `name`. */
++  readonly name: string
++  /** Frontmatter `description`. */
++  readonly description: string
++  /** Frontmatter `whenToUse`, absent when the skill omits it. */
++  readonly whenToUse?: string
++  /** Absolute path of the skill's `SKILL.md` (or its flat markdown file). */
++  readonly path: string
++  /** Absolute path of the skill directory (the file's parent for a flat skill). */
++  readonly directory: string
++  /** Whether the skill forbids model invocation (`disable-model-invocation`). */
++  readonly userOnly: boolean
++  /** Count of extra files beside the entry file; 0 for a flat skill. */
++  readonly files: number
++  /** The markdown body below the frontmatter, so the dialog opens from one read. */
++  readonly body: string
++}
++
++/** The profile the running host booted from, as the chest sees it. */
++export interface ChestProfileView {
++  /** Profile name (its directory name). */
++  readonly name: string
++  /** Absolute profile directory. */
++  readonly root: string
++  /** Bundle package names in patch-layer order. */
++  readonly bundles: readonly string[]
++}
++
++/** One complete chest listing. */
++export interface ChestSnapshot {
++  /** Plugin packages, in chest order. */
++  readonly plugins: readonly ChestPluginEntry[]
++  /** Skills, in chest order. */
++  readonly skills: readonly ChestSkillEntry[]
++  /** The booted profile, or null when the host cannot resolve one. */
++  readonly profile: ChestProfileView | null
++  /** Absolute directory holding plugin packages the chest owns. */
++  readonly pluginRoot: string
++  /** Absolute user skill root the chest manages. */
++  readonly skillRoot: string
++  /** Whether a profile mutation is waiting for the next dsh restart. */
++  readonly restartRequired: boolean
++}
++
++/** Business failure branch shared by every mutating method. */
++export interface ChestFailure {
++  readonly code:
++    | 'invalid-input'
++    | 'duplicate-id'
++    | 'not-found'
++    | 'unsupported-package'
++    | 'invalid-bundle'
++    | 'profile-unavailable'
++    | 'io'
++  readonly message: string
++}
++
++/** One settled chest mutation: the failure, or the whole listing afresh. */
++export type ChestResult =
++  | { readonly ok: true; readonly value: ChestSnapshot }
++  | { readonly ok: false; readonly error: ChestFailure }
++
++/** One file inside a shareable chest bundle. */
++export interface ChestBundleFile {
++  /** Bundle-relative path, always forward-slashed and traversal-free. */
++  readonly path: string
++  /** How `content` encodes the bytes. */
++  readonly encoding: 'utf8' | 'base64'
++  /** The file body, encoded per `encoding`. */
++  readonly content: string
++}
++
++/**
++ * One shareable chest bundle: a single JSON document carrying a plugin package
++ * or a skill directory whole, so sharing is one file and importing is one file.
++ */
++export interface ChestBundle {
++  /** Format marker; a bundle without it is refused. */
++  readonly format: 'dsh-chest'
++  /** Format revision, so a future reader can migrate rather than guess. */
++  readonly revision: 1
++  /** Which half of the chest the bundle carries. */
++  readonly kind: 'plugin' | 'skill'
++  /** Suggested id (folder name) on import. */
++  readonly id: string
++  /** Human-readable name, for a picker or a log line. */
++  readonly name: string
++  /** One-line summary. */
++  readonly description: string
++  /** Export time in epoch millis. */
++  readonly createdAt: number
++  /** Every file the artifact is made of. */
++  readonly files: readonly ChestBundleFile[]
++}
++
++/** One settled export. */
++export type ChestExportResult =
++  | { readonly ok: true; readonly value: ChestBundle }
++  | { readonly ok: false; readonly error: ChestFailure }
++
++/** How an import brings a plugin into the chest. */
++export interface ChestPluginRequest {
++  /** Absolute path of a folder holding the plugin package. */
++  readonly path?: string
++  /** A bundle body received from another chest. */
++  readonly bundle?: ChestBundle
++}
++
++/** A skill as authored in the chest dialog. */
++export interface ChestSkillDraft {
++  /** Frontmatter `name`; also the id source for a new skill. */
++  readonly name: string
++  /** Frontmatter `description`. */
++  readonly description: string
++  /** Frontmatter `whenToUse`, omitted when blank. */
++  readonly whenToUse?: string
++  /** Markdown body below the frontmatter. */
++  readonly body: string
++  /** Whether to write `disable-model-invocation: true`. */
++  readonly userOnly?: boolean
++}
++
++declare module '@deepseek-ai/cordis' {
++  interface Events {
++    /**
++     * The chest changed: a plugin was (un)installed or reordered, or a skill
++     * was written or removed. Observers re-list; the payload carries no
++     * projection because the listing itself is the authoritative read.
++     * @mode emit
++     */
++    'pluginShelf/change'(): void
++  }
++}
+diff --git a/packages/host/plugin-shelf/tests/plugin-shelf.spec.ts b/packages/host/plugin-shelf/tests/plugin-shelf.spec.ts
+new file mode 100644
+index 0000000..6a1a1c3
+--- /dev/null
++++ b/packages/host/plugin-shelf/tests/plugin-shelf.spec.ts
+@@ -0,0 +1,231 @@
++import { afterEach, describe, expect, it } from 'vitest'
++import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { pathToFileURL } from 'node:url'
++import { Context } from '@deepseek-ai/cordis'
++import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
++import PluginShelfGateway from '../src/index.ts'
++import { slugOf } from '../src/skills.ts'
++import type { ChestSkillDraft } from '../src/types.ts'
++
++const contexts: Context[] = []
++const tempDirs: string[] = []
++
++afterEach(async () => {
++  await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
++  await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })))
++})
++
++async function tempDir(prefix: string): Promise<string> {
++  const dir = await mkdtemp(join(tmpdir(), prefix))
++  tempDirs.push(dir)
++  return dir
++}
++
++/** A profile directory whose package.json carries dsh.profile.bundles. */
++async function profileDir(): Promise<string> {
++  const dir = await tempDir('dsh-chest-profile-')
++  await writeFile(join(dir, 'package.json'), `${JSON.stringify({
++    name: 'dsh-profile-chest-test',
++    private: true,
++    dependencies: {},
++    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
++  }, null, 2)}\n`, 'utf8')
++  return dir
++}
++
++/** A minimal plugin package: manifest, patch layer, and a host entry. */
++async function pluginPackage(name: string, parent: string): Promise<string> {
++  const dir = join(parent, name)
++  await mkdir(dir, { recursive: true })
++  await writeFile(join(dir, 'package.json'), `${JSON.stringify({
++    name,
++    version: '1.0.0',
++    description: 'chest test plugin',
++    type: 'module',
++    main: 'index.js',
++    exports: { '.': './index.js', './client': { default: './lib/client.js' } },
++    dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } },
++  }, null, 2)}\n`, 'utf8')
++  await writeFile(join(dir, 'cordis.patch.yml'), `- insert:\n    - id: ${name}\n      name: ${name}\n`, 'utf8')
++  await writeFile(join(dir, 'index.js'), 'export function apply() {}\n', 'utf8')
++  await mkdir(join(dir, 'lib'), { recursive: true })
++  await writeFile(join(dir, 'lib', 'client.js'), 'window.__ModuleLoader__.load({ id: "x" })\n', 'utf8')
++  return dir
++}
++
++interface Harness {
++  readonly ctx: Context
++  readonly chest: PluginShelfGateway
++  readonly profile: string
++  readonly skills: string
++}
++
++async function harness(): Promise<Harness> {
++  const root = await tempDir('dsh-chest-')
++  const skills = join(root, 'skills')
++  const profile = await profileDir()
++  const ctx = new Context()
++  contexts.push(ctx)
++  // The gateway reads the booted profile from the Loader's base URL.
++  ctx.baseUrl = pathToFileURL(`${profile}\\`).href
++  await ctx.plugin(PluginShelfGateway, { root: join(root, 'chest'), skillRoot: skills })
++  return { ctx, chest: ctx.get('pluginShelf') as PluginShelfGateway, profile, skills }
++}
++
++const REVIEW: ChestSkillDraft = {
++  name: '代码评审',
++  description: '按清单评审一次改动',
++  whenToUse: '当用户要求评审代码时',
++  body: '# 评审\n\n1. 先看测试\n2. 再看边界\n',
++}
++
++/** Read one profile manifest back as a mutable record. */
++async function profileManifest(profile: string): Promise<Record<string, unknown>> {
++  return JSON.parse(await readFile(join(profile, 'package.json'), 'utf8')) as Record<string, unknown>
++}
++
++describe('PluginShelfGateway (chest)', () => {
++  it('publishes the chest methods under the pluginShelf namespace', async () => {
++    const { chest } = await harness()
++    expect(chest.typertRemote).toMatchObject({ serviceKey: 'pluginShelf', namespace: 'pluginShelf' })
++    expect(remoteMethods(chest).map(method => method.method).sort()).toEqual([
++      'createSkill', 'deletePlugin', 'deleteSkill', 'exportPlugin', 'exportSkill', 'importPlugin',
++      'importSkill', 'installPlugin', 'list', 'reorderPlugins', 'reorderSkills', 'uninstallPlugin',
++      'updateSkill',
++    ])
++  })
++
++  it('reports an empty chest plus the booted profile', async () => {
++    const { chest, skills } = await harness()
++    const snapshot = await chest.list()
++    expect(snapshot.plugins).toEqual([])
++    expect(snapshot.skills).toEqual([])
++    expect(snapshot.skillRoot).toBe(skills)
++    expect(snapshot.profile?.bundles).toEqual(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
++    expect(snapshot.restartRequired).toBe(false)
++  })
++
++  it('writes, rewrites, and removes a real SKILL.md', async () => {
++    const { chest, skills } = await harness()
++    const created = await chest.createSkill(REVIEW)
++    expect(created.ok).toBe(true)
++
++    const file = join(skills, slugOf(REVIEW.name), 'SKILL.md')
++    const body = await readFile(file, 'utf8')
++    expect(body).toContain('description: "按清单评审一次改动"')
++    expect(body).toContain('whenToUse: "当用户要求评审代码时"')
++    expect(body).toContain('1. 先看测试')
++
++    const listed = await chest.list()
++    expect(listed.skills).toHaveLength(1)
++    expect(listed.skills[0]).toMatchObject({ name: '代码评审', files: 0, userOnly: false })
++    expect(listed.skills[0]?.body).toContain('先看测试')
++
++    // A duplicate slug is a business failure, not an io error.
++    const duplicate = await chest.createSkill(REVIEW)
++    expect(duplicate).toMatchObject({ ok: false, error: { code: 'duplicate-id' } })
++
++    const updated = await chest.updateSkill(listed.skills[0]?.id ?? '', { ...REVIEW, body: '# 改过了\n' })
++    expect(updated.ok).toBe(true)
++    expect(await readFile(file, 'utf8')).toContain('改过了')
++
++    const removed = await chest.deleteSkill(listed.skills[0]?.id ?? '')
++    expect(removed.ok).toBe(true)
++    expect((await chest.list()).skills).toEqual([])
++  })
++
++  it('registers a plugin folder in place and installs it into the profile', async () => {
++    const { chest, profile } = await harness()
++    const workspace = await tempDir('dsh-chest-plugins-')
++    const source = await pluginPackage('dsh-demo', workspace)
++
++    const registered = await chest.importPlugin({ path: source })
++    expect(registered.ok).toBe(true)
++    if (!registered.ok) return
++    const entry = registered.value.plugins[0]
++    expect(entry).toMatchObject({
++      id: 'dsh-demo', packageName: 'dsh-demo', origin: 'external', installed: false,
++      hasPatch: true, hasClient: true,
++    })
++
++    const installed = await chest.installPlugin('dsh-demo')
++    expect(installed.ok).toBe(true)
++    if (!installed.ok) return
++    expect(installed.value.restartRequired).toBe(true)
++    expect(installed.value.plugins[0]?.installed).toBe(true)
++
++    const manifest = await profileManifest(profile)
++    expect((manifest.dependencies as Record<string, string>)['dsh-demo']).toBe(`link:${source.replace(/\\/g, '/')}`)
++    expect((manifest.dsh as { profile: { bundles: string[] } }).profile.bundles).toContain('dsh-demo')
++    const link = join(profile, 'node_modules', 'dsh-demo')
++    expect((await lstat(link)).isSymbolicLink()).toBe(true)
++
++    const uninstalled = await chest.uninstallPlugin('dsh-demo')
++    expect(uninstalled.ok).toBe(true)
++    const after = await profileManifest(profile)
++    expect((after.dependencies as Record<string, string>)['dsh-demo']).toBeUndefined()
++    expect((after.dsh as { profile: { bundles: string[] } }).profile.bundles).not.toContain('dsh-demo')
++  })
++
++  it('round-trips one plugin through a chest bundle and a store copy', async () => {
++    const { chest } = await harness()
++    const workspace = await tempDir('dsh-chest-roundtrip-')
++    const source = await pluginPackage('dsh-whale-diving', workspace)
++    await chest.importPlugin({ path: source })
++
++    const exported = await chest.exportPlugin('dsh-whale-diving')
++    expect(exported.ok).toBe(true)
++    if (!exported.ok) return
++    expect(exported.value).toMatchObject({ format: 'dsh-chest', revision: 1, kind: 'plugin' })
++    const paths = exported.value.files.map(file => file.path)
++    expect(paths).toContain('package.json')
++    expect(paths).toContain('cordis.patch.yml')
++    expect(paths).toContain('lib/client.js')
++
++    // A bundle with a different id lands in the store, not next to the original.
++    const adopted = await chest.importPlugin({ bundle: { ...exported.value, id: 'dsh-whale-diving-copy' } })
++    expect(adopted.ok).toBe(true)
++    if (!adopted.ok) return
++    const stored = adopted.value.plugins.find(entry => entry.id === 'dsh-whale-diving-copy')
++    expect(stored).toMatchObject({ origin: 'store', installed: false })
++    expect(await readFile(join(stored?.path ?? '', 'index.js'), 'utf8')).toContain('export function apply')
++
++    // A traversal attempt never reaches the filesystem.
++    const hostile = await chest.importPlugin({ bundle: { ...exported.value, id: 'evil', files: [{ path: '../escape.js', encoding: 'utf8', content: 'x' }] } })
++    expect(hostile).toMatchObject({ ok: false, error: { code: 'invalid-bundle' } })
++  })
++
++  it('reorders the chest and the profile bundle slots together', async () => {
++    const { chest, profile } = await harness()
++    const workspace = await tempDir('dsh-chest-order-')
++    await chest.importPlugin({ path: await pluginPackage('dsh-first', workspace) })
++    await chest.importPlugin({ path: await pluginPackage('dsh-second', workspace) })
++    await chest.installPlugin('dsh-first')
++    await chest.installPlugin('dsh-second')
++
++    const reordered = await chest.reorderPlugins(['dsh-second', 'dsh-first'])
++    expect(reordered.ok).toBe(true)
++    if (!reordered.ok) return
++    expect(reordered.value.plugins.map(entry => entry.id)).toEqual(['dsh-second', 'dsh-first'])
++    expect((await profileManifest(profile)).dsh).toMatchObject({
++      profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-second', 'dsh-first'] },
++    })
++
++    // A list that does not name every plugin exactly once is refused.
++    expect(await chest.reorderPlugins(['dsh-first'])).toMatchObject({
++      ok: false, error: { code: 'invalid-input' },
++    })
++  })
++
++  it('emits pluginShelf/change after a mutation', async () => {
++    const { ctx, chest } = await harness()
++    const changes: number[] = []
++    ctx.on('pluginShelf/change', () => { changes.push(0) })
++
++    await chest.createSkill(REVIEW)
++    await chest.deleteSkill(slugOf(REVIEW.name))
++    expect(changes.length).toBeGreaterThanOrEqual(2)
++  })
++})
+diff --git a/packages/host/plugin-shelf/tsconfig.json b/packages/host/plugin-shelf/tsconfig.json
+new file mode 100644
+index 0000000..52dde6f
+--- /dev/null
++++ b/packages/host/plugin-shelf/tsconfig.json
+@@ -0,0 +1,24 @@
++{
++  "extends": "../../../tsconfig.base.json",
++  "compilerOptions": {
++    "rootDir": "src",
++    "outDir": "lib/types"
++  },
++  "include": [
++    "src"
++  ],
++  "references": [
++    {
++      "path": "../../../vendor/cordis"
++    },
++    {
++      "path": "../../util/home-paths"
++    },
++    {
++      "path": "../../runtime-diagnostics/invariants"
++    },
++    {
++      "path": "../../typert/protocol"
++    }
++  ]
++}
+diff --git a/tsconfig.base.json b/tsconfig.base.json
+index 16d69db..04f716b 100644
+--- a/tsconfig.base.json
++++ b/tsconfig.base.json
+@@ -171,6 +171,9 @@
+       "@deepseek-ai/dsh-host-frontend-static": ["./packages/host/frontend-static/src"],
+       "@deepseek-ai/dsh-host-plugin-inventory": ["./packages/host/plugin-inventory/src"],
+       "@deepseek-ai/dsh-host-plugin-inventory/types": ["./packages/host/plugin-inventory/src/types.ts"],
++      "@deepseek-ai/dsh-host-plugin-shelf": ["./packages/host/plugin-shelf/src"],
++      "@deepseek-ai/dsh-host-plugin-shelf/types": ["./packages/host/plugin-shelf/src/types.ts"],
++      "@deepseek-ai/dsh-client-ui-plugin-shelf": ["./packages/client/ui-plugin-shelf/src"],
+       "@deepseek-ai/dsh-client-ui-slots": ["./packages/client/ui-slots/src"],
+       "@deepseek-ai/dsh-client-ui-attachment": ["./packages/client/ui-attachment/src"],
+       "@deepseek-ai/dsh-client-ui-primitives": ["./packages/client/ui-primitives/src"],
+diff --git a/tsconfig.host.json b/tsconfig.host.json
+index 4590362..b8ffe3c 100644
+--- a/tsconfig.host.json
++++ b/tsconfig.host.json
+@@ -287,6 +287,7 @@
+     { "path": "./packages/host/directory-picker-native" },
+     { "path": "./packages/host/frontend-static" },
+     { "path": "./packages/host/plugin-inventory" },
++    { "path": "./packages/host/plugin-shelf" },
+     { "path": "./packages/host/webserver" },
+     { "path": "./packages/sdk/client" },
+     { "path": "./packages/sdk/protocol" },
+-- 
+2.54.0.windows.1
+

@@ -1,0 +1,2168 @@
+From 446b8b2ca7e2fd71c641473a646f8d64d1305298 Mon Sep 17 00:00:00 2001
+From: ZeroCode321 <ZeroCode321@users.noreply.github.com>
+Date: Wed, 23 Sep 2026 00:20:23 +0800
+Subject: [PATCH] feat(chest): sidebar chest section, '@' source, and .chest
+ sharing
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The sidebar section is a fold: the header opens the `plugin` and `skill`
+groups, and the choice persists in localStorage. A row opens a dialog carrying
+every action — install or uninstall, move, export, delete — because a sidebar
+column is too narrow to hang five buttons off every line. The plugin inventory
+supplies the live module names, which is how a row tells "installed and running"
+from "installed, restart to apply".
+
+The '@' source picks differently per kind: a skill lands the `/name` reference
+the skill pipeline already understands, and a plugin lands its package
+directory, because a plugin is code the agent works on rather than text it acts
+out. Copy carries no emoji; every glyph is an icon atom.
+---
+ packages/client/README.md                     |   1 +
+ packages/client/ui-plugin-shelf/README.md     |  75 +++
+ packages/client/ui-plugin-shelf/package.json  |  85 +++
+ .../src/client/ChestSection.module.css        | 371 +++++++++++
+ .../src/client/ChestSection.tsx               | 621 ++++++++++++++++++
+ .../ui-plugin-shelf/src/client/contract.ts    |  90 +++
+ .../ui-plugin-shelf/src/client/index.ts       | 249 +++++++
+ .../ui-plugin-shelf/src/client/locales.ts     | 148 +++++
+ .../ui-plugin-shelf/src/client/preference.ts  |  21 +
+ .../ui-plugin-shelf/src/css-modules.d.ts      |   6 +
+ packages/client/ui-plugin-shelf/src/index.ts  |   9 +
+ .../client/ui-plugin-shelf/src/invariant.ts   |  31 +
+ .../tests/chest.client.spec.ts                |  60 ++
+ packages/client/ui-plugin-shelf/tsconfig.json |  39 ++
+ .../client/ui-plugin-shelf/tsdown.config.ts   |   3 +
+ .../ui-sidebar/src/client/SidebarRoot.tsx     |   4 +
+ .../ui-sidebar/src/client/contract/slots.ts   |  18 +-
+ .../client/ui-sidebar/src/client/index.ts     |   8 +-
+ .../sidebar-snapshot.client.spec.tsx.snap     |  12 +
+ .../tests/sidebar-root.client.spec.tsx        |  17 +-
+ tsconfig.client.json                          |   1 +
+ 21 files changed, 1863 insertions(+), 6 deletions(-)
+ create mode 100644 packages/client/ui-plugin-shelf/README.md
+ create mode 100644 packages/client/ui-plugin-shelf/package.json
+ create mode 100644 packages/client/ui-plugin-shelf/src/client/ChestSection.module.css
+ create mode 100644 packages/client/ui-plugin-shelf/src/client/ChestSection.tsx
+ create mode 100644 packages/client/ui-plugin-shelf/src/client/contract.ts
+ create mode 100644 packages/client/ui-plugin-shelf/src/client/index.ts
+ create mode 100644 packages/client/ui-plugin-shelf/src/client/locales.ts
+ create mode 100644 packages/client/ui-plugin-shelf/src/client/preference.ts
+ create mode 100644 packages/client/ui-plugin-shelf/src/css-modules.d.ts
+ create mode 100644 packages/client/ui-plugin-shelf/src/index.ts
+ create mode 100644 packages/client/ui-plugin-shelf/src/invariant.ts
+ create mode 100644 packages/client/ui-plugin-shelf/tests/chest.client.spec.ts
+ create mode 100644 packages/client/ui-plugin-shelf/tsconfig.json
+ create mode 100644 packages/client/ui-plugin-shelf/tsdown.config.ts
+
+diff --git a/packages/client/README.md b/packages/client/README.md
+index f22ae99..444749b 100644
+--- a/packages/client/README.md
++++ b/packages/client/README.md
+@@ -42,6 +42,7 @@ The browser side of the dsh web GUI: shell boot, browser-host communication, sha
+ | [`ui-settings-general/`](ui-settings-general/README.md) | Provides the general settings section. |
+ | [`ui-settings-models/`](ui-settings-models/README.md) | Provides model-provider configuration and DeepSeek onboarding. |
+ | [`ui-settings-plugin-inventory/`](ui-settings-plugin-inventory/README.md) | Contributes the read-only Host Loader inventory tab to Plugins settings. |
++| [`ui-plugin-shelf/`](ui-plugin-shelf/README.md) | The sidebar chest: `plugin` and `skill` groups, the `@` source, and `.chest` export/import. |
+ 
+ Each child reference owns its contract and detailed behavior. The [slot system standard](../../.agents/notes/implemented/architecture/2026-07-22-slot-type-chain-implementation.md) and [web client architecture note](../../.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.md) own the cross-package composition and loading decisions.
+ 
+diff --git a/packages/client/ui-plugin-shelf/README.md b/packages/client/ui-plugin-shelf/README.md
+new file mode 100644
+index 0000000..a2a3fb5
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/README.md
+@@ -0,0 +1,75 @@
++# @deepseek-ai/dsh-client-ui-plugin-shelf
++
++The **chest** in the DeepSeek Harness web GUI sidebar: a `plugin` group and a
++`skill` group over one scroll region, each row opening a dialog that carries
++every action for that artifact — install or uninstall, move up or down, export,
++delete. No copy in this section carries emoji; every glyph is an icon atom.
++
++The data lives on the Host (`@deepseek-ai/dsh-host-plugin-shelf`); this package
++holds a client-side snapshot refreshed from the `pluginShelf` Remote on load, on
++`pluginShelf/change` notifications, on connection resets, and from the listing
++every mutation returns. The snapshot is published to the section through the
++inject `hooks` compartment (`useChest`), together with the module names the
++plugin inventory reports as active — that is how a row distinguishes "installed
++and running" from "installed, restart to apply". The `@` source reads the same
++snapshot synchronously, so candidate filtering never issues an RPC per keystroke.
++
++## Sidebar section
++
++The `sidebar.plugins` hole is declared by `@deepseek-ai/dsh-client-ui-sidebar`
++between the workspace browser and the sidebar foot. The section is wide-only: the
++56px rail hides it. The header is the fold control: the chest opens on a click and
++otherwise stays one row, with the entry count beside the label and a
++pending-restart line kept visible even while folded. The fold is a browser
++preference persisted in `localStorage` (`dsh.chest.expanded`), so a folded chest
++stays folded across reloads. Each group header carries its own `+` (add a plugin
++folder or import a `.chest` file; author a skill or import a shared one), and the
++header keeps a refresh affordance.
++
++## '@' invocation
++
++Typing `@` in the composer opens the trigger menu; the chest group lists skills
++and plugins filtered by the typed query. The two kinds pick differently because
++they are different things:
++
++- a **skill** pick lands `/<name> `, the reference the skill pipeline already
++  understands, so the chest only shortens the trip to a skill's name;
++- a **plugin** pick lands the package name and its directory, because a plugin is
++  code the agent works *on* rather than text it acts out.
++
++The source also provides a lexicon, so a manually typed name is decorated in the
++draft the way the subagent reference source is.
++
++## Export and import
++
++Export asks the Host for a `.chest` document and hands it to the browser as a
++download (`<id>.chest`). Import reads a picked file and sends it back over the
++same Remote, which is how a shared plugin or skill arrives. Neither path adds a
++prompt section or a tool.
++
++## Model Experience
++
++### Text the chest lands in the user draft
++
++#### What the model sees
++
++An `@` pick inserts ordinary user draft text (a `/name` reference for a skill, a package name and directory for a plugin); the model sees whatever the user actually sends. The sidebar listing, the dialogs, and the export/import helpers add no prompt section and register no tools or schemas.
++
++#### Token effect
++
++Conditional and append-only: a picked reference adds tokens only to the new user message it is sent in. Browsing, reordering, installing, exporting, and importing add zero model tokens.
++
++#### KV Cache effect
++
++Append-only. This package never edits earlier request tokens.
++
++## Known Limitations and Deferred Work
++
++- **Whitespace in names** — the `@` trigger token cannot span whitespace, so a
++  multi-word skill or package name must be picked from the filtered menu rather
++  than typed to completion.
++- **Install state is a two-part truth** — the listing says what the profile
++  records and the inventory says what the process loaded; a mismatch is shown as
++  "restart to apply" rather than resolved, because only a restart resolves it.
++- **No drag-and-drop ordering** — order moves one slot at a time through the
++  dialog's move actions.
+diff --git a/packages/client/ui-plugin-shelf/package.json b/packages/client/ui-plugin-shelf/package.json
+new file mode 100644
+index 0000000..4717259
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/package.json
+@@ -0,0 +1,85 @@
++{
++  "name": "@deepseek-ai/dsh-client-ui-plugin-shelf",
++  "description": "The chest in the sidebar: plugin and skill groups, the '@' source, and .chest export and import",
++  "version": "0.1.0-rc.5",
++  "publishConfig": {
++    "access": "public"
++  },
++  "repository": {
++    "type": "git",
++    "url": "git+https://github.com/deepseek-ai/deepseek-harness.git",
++    "directory": "packages/client/ui-plugin-shelf"
++  },
++  "type": "module",
++  "main": "lib/index.js",
++  "types": "lib/types/index.d.ts",
++  "exports": {
++    ".": {
++      "types": "./lib/types/index.d.ts",
++      "default": "./lib/index.js"
++    },
++    "./invariant": {
++      "types": "./lib/types/invariant.d.ts",
++      "default": "./lib/invariant.js"
++    },
++    "./client": {
++      "types": "./lib/types/client/index.d.ts",
++      "default": "./lib/client.js"
++    },
++    "./src/*": "./src/*",
++    "./package.json": "./package.json"
++  },
++  "dsh": {
++    "client": {
++      "inject": [
++        "@deepseek-ai/dsh-api-remotes",
++        "@deepseek-ai/dsh-client-locale",
++        "@deepseek-ai/dsh-client-runtime",
++        "@deepseek-ai/dsh-client-ui-input-trigger",
++        "@deepseek-ai/dsh-client-ui-primitives",
++        "@deepseek-ai/dsh-client-ui-sidebar",
++        "@deepseek-ai/dsh-client-ui-slots"
++      ],
++      "platform": "web"
++    }
++  },
++  "scripts": {
++    "bundle": "tsdown",
++    "watch": "tsdown --watch"
++  },
++  "license": "MIT",
++  "dependencies": {
++    "react": "^18.2.0"
++  },
++  "peerDependencies": {
++    "@deepseek-ai/dsh-api-remotes": "workspace:^",
++    "@deepseek-ai/dsh-client-locale": "workspace:^",
++    "@deepseek-ai/dsh-client-runtime": "workspace:^",
++    "@deepseek-ai/dsh-client-ui-input-trigger": "workspace:^",
++    "@deepseek-ai/dsh-client-ui-primitives": "workspace:^",
++    "@deepseek-ai/dsh-client-ui-sidebar": "workspace:^",
++    "@deepseek-ai/dsh-client-ui-slots": "workspace:^",
++    "@deepseek-ai/dsh-host-plugin-shelf": "workspace:^",
++    "@deepseek-ai/dsh-invariants": "workspace:^",
++    "@deepseek-ai/cordis": "workspace:^"
++  },
++  "devDependencies": {
++    "@deepseek-ai/dsh-api-remotes": "workspace:^",
++    "@deepseek-ai/dsh-client-locale": "workspace:^",
++    "@deepseek-ai/dsh-client-runtime": "workspace:^",
++    "@deepseek-ai/dsh-client-ui-input-trigger": "workspace:^",
++    "@deepseek-ai/dsh-client-ui-primitives": "workspace:^",
++    "@deepseek-ai/dsh-client-ui-sidebar": "workspace:^",
++    "@deepseek-ai/dsh-client-ui-slots": "workspace:^",
++    "@deepseek-ai/dsh-host-plugin-shelf": "workspace:^",
++    "@deepseek-ai/dsh-invariants": "workspace:^",
++    "@deepseek-ai/cordis": "workspace:^",
++    "@types/react": "~18.3.1"
++  },
++  "files": [
++    "lib/index.js",
++    "lib/invariant.js",
++    "lib/client.js",
++    "lib/types/**/*.d.ts"
++  ]
++}
+diff --git a/packages/client/ui-plugin-shelf/src/client/ChestSection.module.css b/packages/client/ui-plugin-shelf/src/client/ChestSection.module.css
+new file mode 100644
+index 0000000..0f0dba2
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/src/client/ChestSection.module.css
+@@ -0,0 +1,371 @@
++/* chest section: a compact header, one scroll region holding the plugin and
++   skill groups, and the dialogs those rows open. Mirrors the workspace
++   browser's section rhythm and the sidebar's token vocabulary — no literal
++   colors anywhere. */
++
++.root {
++  flex: none;
++  display: flex;
++  flex-direction: column;
++  min-height: 0;
++  max-height: 46%;
++  padding: 0 4px 4px 4px;
++  box-sizing: border-box;
++  border-top: 1px solid var(--dsw-alias-border-l2);
++  margin-top: 8px;
++  overflow: hidden;
++}
++
++.header {
++  flex: none;
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 4px;
++  height: 32px;
++  padding-left: 4px;
++  box-sizing: border-box;
++}
++
++/* The header's left half is the fold control: the whole label area toggles, so
++   the target is the row a person already aims at. */
++.headerToggle {
++  flex: 1;
++  min-width: 0;
++  display: flex;
++  align-items: center;
++  gap: 4px;
++  height: 24px;
++  padding: 0 4px;
++  border: none;
++  border-radius: 6px;
++  background: transparent;
++  cursor: pointer;
++  text-align: left;
++  color: inherit;
++}
++
++.headerToggle:hover {
++  background: var(--dsw-alias-interactive-bg-hover);
++}
++
++.chevron {
++  flex: none;
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  width: 14px;
++  height: 14px;
++  color: var(--dsw-alias-label-tertiary);
++}
++
++.count {
++  flex: none;
++  font-size: 11px;
++  line-height: 16px;
++  color: var(--dsw-alias-label-tertiary);
++}
++
++.title {
++  min-width: 0;
++  overflow: hidden;
++  white-space: nowrap;
++  font-size: 13px;
++  line-height: 20px;
++  font-weight: 500;
++  color: var(--dsw-alias-label-secondary);
++}
++
++.iconButton {
++  flex: none;
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  width: 22px;
++  height: 22px;
++  border: none;
++  border-radius: 50%;
++  padding: 0;
++  background: transparent;
++  cursor: pointer;
++  color: var(--dsw-alias-label-secondary);
++}
++
++.iconButton:hover {
++  background: var(--dsw-alias-interactive-bg-hover);
++  color: var(--dsw-alias-label-primary);
++}
++
++.body {
++  flex: 1;
++  min-height: 0;
++  overflow-y: auto;
++  display: flex;
++  flex-direction: column;
++  gap: 2px;
++}
++
++.group {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 4px;
++  height: 24px;
++  padding: 0 2px 0 4px;
++  margin-top: 4px;
++}
++
++.groupTitle {
++  min-width: 0;
++  overflow: hidden;
++  white-space: nowrap;
++  font-size: 11px;
++  line-height: 16px;
++  letter-spacing: 0.04em;
++  text-transform: lowercase;
++  color: var(--dsw-alias-label-tertiary);
++}
++
++.status {
++  margin: 0;
++  padding: 4px 8px;
++  font-size: 12px;
++  line-height: 18px;
++  color: var(--dsw-alias-label-tertiary);
++  display: flex;
++  align-items: center;
++  gap: 8px;
++}
++
++.retry {
++  flex: none;
++  border: none;
++  background: transparent;
++  padding: 0;
++  cursor: pointer;
++  font-size: 12px;
++  color: var(--dsw-alias-accent-strong);
++}
++
++.notice {
++  margin: 0;
++  padding: 2px 8px;
++  font-size: 11px;
++  line-height: 16px;
++  color: var(--dsw-alias-label-secondary);
++}
++
++.warning {
++  margin: 0;
++  padding: 2px 8px;
++  font-size: 11px;
++  line-height: 16px;
++  color: var(--dsw-alias-label-secondary);
++  background: var(--dsw-alias-bg-l2);
++  border-radius: 6px;
++}
++
++.list {
++  margin: 0;
++  padding: 0;
++  list-style: none;
++  display: flex;
++  flex-direction: column;
++  gap: 1px;
++}
++
++.row {
++  display: flex;
++  align-items: stretch;
++  border-radius: 8px;
++}
++
++.row:hover {
++  background: var(--dsw-alias-interactive-bg-hover);
++}
++
++.rowMain {
++  flex: 1;
++  min-width: 0;
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  padding: 3px 4px;
++  border: none;
++  background: transparent;
++  cursor: pointer;
++  text-align: left;
++  color: inherit;
++}
++
++.rowIcon {
++  flex: none;
++  width: 20px;
++  height: 20px;
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  color: var(--dsw-alias-label-secondary);
++}
++
++.texts {
++  flex: 1;
++  min-width: 0;
++  display: flex;
++  flex-direction: column;
++  gap: 1px;
++}
++
++.name {
++  overflow: hidden;
++  white-space: nowrap;
++  text-overflow: ellipsis;
++  font-size: 13px;
++  line-height: 18px;
++  color: var(--dsw-alias-label-primary);
++}
++
++.meta {
++  overflow: hidden;
++  white-space: nowrap;
++  text-overflow: ellipsis;
++  font-size: 11px;
++  line-height: 16px;
++  color: var(--dsw-alias-label-tertiary);
++}
++
++.footer {
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  width: 100%;
++}
++
++.footerRow {
++  display: flex;
++  flex-wrap: wrap;
++  justify-content: flex-end;
++  gap: 8px;
++}
++
++.form {
++  display: flex;
++  flex-direction: column;
++  gap: 12px;
++}
++
++.formActions {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 8px;
++}
++
++.field {
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++}
++
++.fieldLabel {
++  font-size: 12px;
++  line-height: 18px;
++  color: var(--dsw-alias-label-secondary);
++}
++
++.input {
++  width: 100%;
++  box-sizing: border-box;
++  height: 34px;
++  padding: 6px 10px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 8px;
++  background: var(--dsw-alias-input-fill);
++  color: var(--dsw-alias-label-primary);
++  font-size: 13px;
++  font-family: inherit;
++}
++
++.input:focus {
++  outline: none;
++  border-color: var(--dsw-alias-accent-strong);
++}
++
++.textarea {
++  width: 100%;
++  box-sizing: border-box;
++  min-height: 120px;
++  padding: 8px 10px;
++  border: 1px solid var(--dsw-alias-border-l2);
++  border-radius: 8px;
++  background: var(--dsw-alias-input-fill);
++  color: var(--dsw-alias-label-primary);
++  font-size: 13px;
++  line-height: 20px;
++  font-family: inherit;
++  resize: vertical;
++}
++
++.textarea:focus {
++  outline: none;
++  border-color: var(--dsw-alias-accent-strong);
++}
++
++.checkbox {
++  display: flex;
++  align-items: flex-start;
++  gap: 8px;
++  font-size: 12px;
++  line-height: 18px;
++  color: var(--dsw-alias-label-secondary);
++}
++
++.facts {
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++  margin: 0;
++}
++
++.fact {
++  display: flex;
++  flex-direction: column;
++  gap: 2px;
++}
++
++.fact dt {
++  font-size: 12px;
++  line-height: 18px;
++  color: var(--dsw-alias-label-secondary);
++}
++
++.fact dd {
++  margin: 0;
++  font-size: 13px;
++  line-height: 20px;
++  color: var(--dsw-alias-label-primary);
++  word-break: break-all;
++}
++
++.path {
++  font-family: var(--dsw-font-family-mono, monospace);
++  font-size: 12px;
++  color: var(--dsw-alias-label-secondary);
++}
++
++.hint {
++  margin: 0;
++  font-size: 12px;
++  line-height: 18px;
++  color: var(--dsw-alias-label-tertiary);
++}
++
++.failure {
++  margin: 0;
++  font-size: 12px;
++  line-height: 18px;
++  color: var(--dsw-alias-danger-strong);
++}
++
++.hiddenInput {
++  display: none;
++}
+diff --git a/packages/client/ui-plugin-shelf/src/client/ChestSection.tsx b/packages/client/ui-plugin-shelf/src/client/ChestSection.tsx
+new file mode 100644
+index 0000000..3aecb87
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/src/client/ChestSection.tsx
+@@ -0,0 +1,621 @@
++/**
++ * The sidebar chest section: one header with a refresh affordance, then the
++ * `plugin` and `skill` groups over a single scroll region.
++ *
++ * Rows are deliberately quiet — icon, name, one meta line, and a state dot that
++ * distinguishes "installed and running" from "installed, restart to apply". A
++ * row opens a dialog that carries every action, because a sidebar column is too
++ * narrow to hang five buttons off every line.
++ *
++ * The section owns no data: the listing arrives through the bound `useChest`
++ * selector hook and every mutation is a callback that answers with a sentence to
++ * show. Icons come from the icon atoms; no copy in this section carries emoji.
++ */
++import { useEffect, useRef, useState } from 'react'
++import {
++  Button, IconChevronDownOutline14, IconChevronRightOutline14, IconChevronUpOutline14,
++  IconCordisPluginOutline14, IconDownloadOutline16, IconFolderOpenOutline16, IconPauseOutline16,
++  IconPlayOutline16, IconPlusOutline16, IconRefreshOutline14, IconSkillOutline16,
++  IconTrashOutline16, Modal, StateDot,
++} from '@deepseek-ai/dsh-client-ui-primitives'
++import type { ChestPluginEntry, ChestSkillDraft, ChestSkillEntry } from '@deepseek-ai/dsh-host-plugin-shelf/types'
++import type { ChestActionOutcome, ChestKind, ChestSectionProps } from './contract.ts'
++import css from './ChestSection.module.css'
++
++/** How long an action notice stays before the section clears it. */
++const NOTICE_RESET_MS = 4200
++
++/** The blank skill draft behind the "new skill" dialog. */
++function blankSkill(): ChestSkillDraft {
++  return { name: '', description: '', whenToUse: '', body: '' }
++}
++
++/** The editable skill form state. */
++interface SkillForm {
++  readonly id: string | null
++  readonly draft: ChestSkillDraft
++  readonly userOnly: boolean
++}
++
++/** Render the chest section. */
++export function ChestSection(props: ChestSectionProps) {
++  const { wide, refresh, setExpanded, useChest, useChestExpanded, t } = props
++  const view = useChest(state => state)
++  const expanded = useChestExpanded(state => state)
++  const snapshot = view.snapshot
++  const [openPluginId, setOpenPluginId] = useState<string | null>(null)
++  const [form, setForm] = useState<SkillForm | null>(null)
++  const [adding, setAdding] = useState(false)
++  const [busy, setBusy] = useState(false)
++  const [notice, setNotice] = useState<string | null>(null)
++  const [failure, setFailure] = useState<string | null>(null)
++  const [confirming, setConfirming] = useState<string | null>(null)
++  const noticeTimer = useRef<number | undefined>(undefined)
++
++  useEffect(() => () => {
++    if (noticeTimer.current !== undefined) window.clearTimeout(noticeTimer.current)
++  }, [])
++
++  if (!wide) return null
++
++  const live = new Set(view.liveModules)
++  const plugins = snapshot?.plugins ?? []
++  const skills = snapshot?.skills ?? []
++  const openPlugin = plugins.find(entry => entry.id === openPluginId) ?? null
++  // One-slot moves are disabled at the edges: a move that cannot happen must not
++  // report the same "saved" notice a real one does.
++  const pluginIndex = plugins.findIndex(entry => entry.id === openPluginId)
++  const skillIndex = skills.findIndex(entry => entry.id === form?.id)
++  /** Total entries behind the fold, shown so a folded chest still says it holds something. */
++  const held = snapshot === null ? null : plugins.length + skills.length
++
++  const say = (text: string): void => {
++    setNotice(text)
++    if (noticeTimer.current !== undefined) window.clearTimeout(noticeTimer.current)
++    noticeTimer.current = window.setTimeout(() => { setNotice(null) }, NOTICE_RESET_MS)
++  }
++
++  /** Run one action: busy gate, failure sentence, notice on success. */
++  const run = async (action: () => Promise<ChestActionOutcome>, done: string): Promise<boolean> => {
++    setBusy(true)
++    setFailure(null)
++    const outcome = await action()
++    setBusy(false)
++    if (!outcome.ok) {
++      setFailure(`${t('failed')}${outcome.message}`)
++      return false
++    }
++    say(done)
++    return true
++  }
++
++  const pluginState = (entry: ChestPluginEntry): 'live' | 'restart' | 'idle' => {
++    if (!entry.installed) return 'idle'
++    return live.has(entry.packageName) ? 'live' : 'restart'
++  }
++
++  const pluginMeta = (entry: ChestPluginEntry): string => {
++    const origin = entry.origin === 'store' ? t('originStore') : t('originExternal')
++    const state = pluginState(entry)
++    const status = state === 'live' ? t('liveNow') : state === 'restart' ? t('needsRestart') : t('notInstalled')
++    return `${origin} · ${status}`
++  }
++
++  const skillMeta = (entry: ChestSkillEntry): string => {
++    const prefix = entry.userOnly ? `${t('menuUserOnly')} · ` : ''
++    const files = entry.files > 0 ? ` · ${entry.files} ${t('filesAttached')}` : ''
++    return `${prefix}${entry.description}${files}`
++  }
++
++  return (
++    <div className={css.root}>
++      <div className={css.header}>
++        <button
++          type="button"
++          className={css.headerToggle}
++          aria-expanded={expanded}
++          aria-label={expanded ? t('collapse') : t('expand')}
++          title={expanded ? t('collapse') : t('expand')}
++          onClick={() => { setExpanded(!expanded) }}
++        >
++          <span className={css.chevron} aria-hidden="true">
++            {expanded ? <IconChevronDownOutline14 size={14} /> : <IconChevronRightOutline14 size={14} />}
++          </span>
++          <span className={css.title}>{t('section')}</span>
++          {held === null ? null : <span className={css.count}>{held}</span>}
++        </button>
++        <button
++          type="button"
++          className={css.iconButton}
++          aria-label={t('refresh')}
++          title={t('refresh')}
++          onClick={refresh}
++        >
++          <IconRefreshOutline14 size={14} />
++        </button>
++      </div>
++
++      {expanded
++        ? (
++          <>
++            {notice !== null ? <p className={css.notice} role="status">{notice}</p> : null}
++            {snapshot?.restartRequired === true ? <p className={css.warning}>{t('restartNotice')}</p> : null}
++
++            <div className={css.body}>
++              {view.status === 'loading' ? <p className={css.status}>{t('loading')}</p> : null}
++              {view.status === 'error' ? (
++                <p className={css.status}>
++                  <span>{t('error')}</span>
++                  <button type="button" className={css.retry} onClick={refresh}>{t('retry')}</button>
++                </p>
++              ) : null}
++
++              {snapshot !== null ? (
++                <>
++                  <div className={css.group}>
++                    <span className={css.groupTitle}>{t('pluginGroup')}</span>
++                    <button
++                      type="button"
++                      className={css.iconButton}
++                      aria-label={t('addPlugin')}
++                      title={t('addPlugin')}
++                      onClick={() => { setAdding(true); setFailure(null) }}
++                    >
++                      <IconPlusOutline16 size={14} />
++                    </button>
++                  </div>
++                  {plugins.length === 0 ? <p className={css.status}>{t('pluginEmpty')}</p> : null}
++                  <ul className={css.list}>
++                    {plugins.map(entry => (
++                      <li className={css.row} key={`plugin-${entry.id}`}>
++                        <button
++                          type="button"
++                          className={css.rowMain}
++                          title={entry.packageName}
++                          onClick={() => { setOpenPluginId(entry.id); setFailure(null) }}
++                        >
++                          <span className={css.rowIcon} aria-hidden="true"><IconCordisPluginOutline14 size={14} /></span>
++                          <span className={css.texts}>
++                            <span className={css.name}>{entry.packageName}</span>
++                            <span className={css.meta}>{pluginMeta(entry)}</span>
++                          </span>
++                          {pluginState(entry) === 'live' ? <StateDot state="done" size={10} /> : null}
++                          {pluginState(entry) === 'restart' ? <StateDot state="warning" size={10} /> : null}
++                        </button>
++                      </li>
++                    ))}
++                  </ul>
++
++                  <div className={css.group}>
++                    <span className={css.groupTitle}>{t('skillGroup')}</span>
++                    <button
++                      type="button"
++                      className={css.iconButton}
++                      aria-label={t('addSkill')}
++                      title={t('addSkill')}
++                      onClick={() => { setForm({ id: null, draft: blankSkill(), userOnly: false }); setFailure(null) }}
++                    >
++                      <IconPlusOutline16 size={14} />
++                    </button>
++                  </div>
++                  {skills.length === 0 ? <p className={css.status}>{t('skillEmpty')}</p> : null}
++                  <ul className={css.list}>
++                    {skills.map(entry => (
++                      <li className={css.row} key={`skill-${entry.id}`}>
++                        <button
++                          type="button"
++                          className={css.rowMain}
++                          title={entry.path}
++                          onClick={() => {
++                            setForm({
++                              id: entry.id,
++                              draft: {
++                                name: entry.name,
++                                description: entry.description,
++                                whenToUse: entry.whenToUse ?? '',
++                                body: entry.body,
++                              },
++                              userOnly: entry.userOnly,
++                            })
++                            setFailure(null)
++                          }}
++                        >
++                          <span className={css.rowIcon} aria-hidden="true"><IconSkillOutline16 size={14} /></span>
++                          <span className={css.texts}>
++                            <span className={css.name}>{entry.name}</span>
++                            <span className={css.meta}>{skillMeta(entry)}</span>
++                          </span>
++                        </button>
++                      </li>
++                    ))}
++                  </ul>
++                </>
++              ) : null}
++            </div>
++          </>
++        )
++        : (snapshot?.restartRequired === true ? <p className={css.warning}>{t('restartNotice')}</p> : null)}
++
++      <Modal
++        open={openPlugin !== null}
++        onClose={() => { setOpenPluginId(null); setConfirming(null) }}
++        title={openPlugin === null ? t('pluginTitle') : openPlugin.packageName}
++        description={t('pluginAbout')}
++        closeLabel={t('close')}
++        footer={openPlugin === null ? undefined : (
++          <div className={css.footer}>
++            {failure !== null ? <p className={css.failure} role="alert">{failure}</p> : null}
++            <div className={css.footerRow}>
++              <Button
++                variant="ghost"
++                size="sm"
++                icon={<IconChevronUpOutline14 size={14} />}
++                disabled={busy || pluginIndex <= 0}
++                onClick={() => { void run(() => props.movePlugin(openPlugin.id, 'up'), t('saved')) }}
++              >
++                {t('moveUp')}
++              </Button>
++              <Button
++                variant="ghost"
++                size="sm"
++                icon={<IconChevronDownOutline14 size={14} />}
++                disabled={busy || pluginIndex === plugins.length - 1}
++                onClick={() => { void run(() => props.movePlugin(openPlugin.id, 'down'), t('saved')) }}
++              >
++                {t('moveDown')}
++              </Button>
++              <Button
++                variant="ghost"
++                size="sm"
++                icon={<IconDownloadOutline16 size={14} />}
++                disabled={busy}
++                onClick={() => { void run(() => props.exportPlugin(openPlugin.id), t('exported')) }}
++              >
++                {t('export')}
++              </Button>
++            </div>
++            <div className={css.footerRow}>
++              {openPlugin.installed ? (
++                <Button
++                  variant="outline"
++                  size="sm"
++                  icon={<IconPauseOutline16 size={14} />}
++                  disabled={busy}
++                  onClick={() => { void run(() => props.uninstallPlugin(openPlugin.id), t('uninstalledNotice')) }}
++                >
++                  {t('uninstall')}
++                </Button>
++              ) : (
++                <Button
++                  variant="primary"
++                  size="sm"
++                  icon={<IconPlayOutline16 size={14} />}
++                  disabled={busy || !openPlugin.hasPatch}
++                  onClick={() => { void run(() => props.installPlugin(openPlugin.id), t('installedNotice')) }}
++                >
++                  {t('install')}
++                </Button>
++              )}
++              <Button
++                variant="ghost"
++                size="sm"
++                icon={<IconTrashOutline16 size={14} />}
++                disabled={busy}
++                onClick={() => {
++                  if (confirming !== openPlugin.id) {
++                    setConfirming(openPlugin.id)
++                    return
++                  }
++                  setConfirming(null)
++                  void run(() => props.deletePlugin(openPlugin.id), t('removedNotice')).then((ok) => {
++                    if (ok) setOpenPluginId(null)
++                  })
++                }}
++              >
++                {confirming === openPlugin.id ? t('confirmRemove') : t('remove')}
++              </Button>
++            </div>
++          </div>
++        )}
++      >
++        {openPlugin === null ? null : (
++          <dl className={css.facts}>
++            <div className={css.fact}>
++              <dt>{t('skillName')}</dt>
++              <dd>{openPlugin.packageName}{openPlugin.version.length > 0 ? ` · ${openPlugin.version}` : ''}</dd>
++            </div>
++            <div className={css.fact}>
++              <dt>{t('pluginTitle')}</dt>
++              <dd>
++                {openPlugin.hasPatch ? t('hasPatch') : t('noPatch')}
++                {' · '}
++                {openPlugin.hasClient ? t('hasClient') : t('onlyHost')}
++              </dd>
++            </div>
++            <div className={css.fact}>
++              <dt>{t('folderLabel')}</dt>
++              <dd className={css.path}>{openPlugin.path}</dd>
++            </div>
++            <div className={css.fact}>
++              <dt>{t('installed')}</dt>
++              <dd>
++                {pluginState(openPlugin) === 'live'
++                  ? t('liveNow')
++                  : pluginState(openPlugin) === 'restart' ? t('needsRestart') : t('notInstalled')}
++              </dd>
++            </div>
++            <p className={css.hint}>{t('bundleHint')}</p>
++            <p className={css.hint}>
++              {openPlugin.origin === 'store' ? t('deleteStoreHint') : t('deleteExternalHint')}
++            </p>
++          </dl>
++        )}
++      </Modal>
++
++      <Modal
++        open={adding}
++        onClose={() => { setAdding(false); setFailure(null) }}
++        title={t('addPlugin')}
++        closeLabel={t('close')}
++      >
++        <AddPluginBody
++          {...props}
++          failure={failure}
++          setFailure={setFailure}
++          busy={busy}
++          setBusy={setBusy}
++          say={say}
++          onDone={() => { setAdding(false) }}
++        />
++      </Modal>
++
++      <Modal
++        open={form !== null}
++        onClose={() => { setForm(null); setFailure(null) }}
++        title={form?.id === null ? t('newSkillTitle') : t('editSkillTitle')}
++        closeLabel={t('close')}
++        footer={form === null ? undefined : (
++          <div className={css.footer}>
++            {failure !== null ? <p className={css.failure} role="alert">{failure}</p> : null}
++            <div className={css.footerRow}>
++              {form.id !== null ? (
++                <>
++                  <Button
++                    variant="ghost"
++                    size="sm"
++                    icon={<IconChevronUpOutline14 size={14} />}
++                    disabled={busy || skillIndex <= 0}
++                    onClick={() => { void run(() => props.moveSkill(form.id ?? '', 'up'), t('saved')) }}
++                  >
++                    {t('moveUp')}
++                  </Button>
++                  <Button
++                    variant="ghost"
++                    size="sm"
++                    icon={<IconChevronDownOutline14 size={14} />}
++                    disabled={busy || skillIndex === skills.length - 1}
++                    onClick={() => { void run(() => props.moveSkill(form.id ?? '', 'down'), t('saved')) }}
++                  >
++                    {t('moveDown')}
++                  </Button>
++                  <Button
++                    variant="ghost"
++                    size="sm"
++                    icon={<IconDownloadOutline16 size={14} />}
++                    disabled={busy}
++                    onClick={() => { void run(() => props.exportSkill(form.id ?? ''), t('exported')) }}
++                  >
++                    {t('export')}
++                  </Button>
++                </>
++              ) : null}
++            </div>
++            <div className={css.footerRow}>
++              <Button variant="ghost" size="sm" onClick={() => { setForm(null); setFailure(null) }}>
++                {t('cancel')}
++              </Button>
++              <Button
++                variant="primary"
++                size="sm"
++                disabled={busy || form.draft.name.trim().length === 0 || form.draft.description.trim().length === 0}
++                onClick={() => {
++                  const draft: ChestSkillDraft = { ...form.draft, userOnly: form.userOnly }
++                  const action = form.id === null
++                    ? props.createSkill(draft)
++                    : props.updateSkill(form.id, draft)
++                  void run(() => action, t('saved')).then((ok) => { if (ok) setForm(null) })
++                }}
++              >
++                {t('save')}
++              </Button>
++              {form.id !== null ? (
++                <Button
++                  variant="ghost"
++                  size="sm"
++                  icon={<IconTrashOutline16 size={14} />}
++                  disabled={busy}
++                  onClick={() => {
++                    if (confirming !== form.id) {
++                      setConfirming(form.id)
++                      return
++                    }
++                    setConfirming(null)
++                    void run(() => props.deleteSkill(form.id ?? ''), t('removedNotice')).then((ok) => {
++                      if (ok) setForm(null)
++                    })
++                  }}
++                >
++                  {confirming === form.id ? t('confirmRemove') : t('remove')}
++                </Button>
++              ) : null}
++            </div>
++          </div>
++        )}
++      >
++        {form === null ? null : (
++          <div className={css.form}>
++            <label className={css.field}>
++              <span className={css.fieldLabel}>{t('skillName')}</span>
++              <input
++                className={css.input}
++                value={form.draft.name}
++                placeholder={t('skillNamePlaceholder')}
++                onChange={(event) => { setForm({ ...form, draft: { ...form.draft, name: event.currentTarget.value } }) }}
++              />
++            </label>
++            <label className={css.field}>
++              <span className={css.fieldLabel}>{t('skillDescription')}</span>
++              <input
++                className={css.input}
++                value={form.draft.description}
++                placeholder={t('skillDescriptionPlaceholder')}
++                onChange={(event) => { setForm({ ...form, draft: { ...form.draft, description: event.currentTarget.value } }) }}
++              />
++            </label>
++            <label className={css.field}>
++              <span className={css.fieldLabel}>{t('skillWhenToUse')}</span>
++              <input
++                className={css.input}
++                value={form.draft.whenToUse ?? ''}
++                placeholder={t('skillWhenToUsePlaceholder')}
++                onChange={(event) => { setForm({ ...form, draft: { ...form.draft, whenToUse: event.currentTarget.value } }) }}
++              />
++            </label>
++            <label className={css.field}>
++              <span className={css.fieldLabel}>{t('skillBody')}</span>
++              <textarea
++                className={css.textarea}
++                rows={7}
++                value={form.draft.body}
++                placeholder={t('skillBodyPlaceholder')}
++                onChange={(event) => { setForm({ ...form, draft: { ...form.draft, body: event.currentTarget.value } }) }}
++              />
++            </label>
++            <label className={css.checkbox}>
++              <input
++                type="checkbox"
++                checked={form.userOnly}
++                onChange={(event) => { setForm({ ...form, userOnly: event.currentTarget.checked }) }}
++              />
++              <span>{t('skillUserOnly')}</span>
++            </label>
++            {form.id === null ? (
++              <FilePicker
++                kind="skill"
++                label={t('importFile')}
++                importBundle={props.importBundle}
++                disabled={busy}
++                onImported={() => { say(t('saved')); setForm(null) }}
++                onFailed={(message) => { setFailure(`${t('failed')}${message}`) }}
++              />
++            ) : null}
++          </div>
++        )}
++      </Modal>
++    </div>
++  )
++}
++
++/** The add-plugin dialog body: a local folder, or a `.chest` document. */
++function AddPluginBody({
++  addPluginFromPath, importBundle, failure, setFailure, busy, setBusy, say, onDone, t,
++}: ChestSectionProps & {
++  failure: string | null
++  setFailure: (value: string | null) => void
++  busy: boolean
++  setBusy: (value: boolean) => void
++  say: (text: string) => void
++  onDone: () => void
++}) {
++  const [path, setPath] = useState('')
++
++  const add = async (): Promise<void> => {
++    if (path.trim().length === 0) return
++    setBusy(true)
++    setFailure(null)
++    const outcome = await addPluginFromPath(path.trim())
++    setBusy(false)
++    if (!outcome.ok) {
++      setFailure(`${t('failed')}${outcome.message}`)
++      return
++    }
++    say(t('saved'))
++    setPath('')
++    onDone()
++  }
++
++  return (
++    <div className={css.form}>
++      {failure !== null ? <p className={css.failure} role="alert">{failure}</p> : null}
++      <label className={css.field}>
++        <span className={css.fieldLabel}>{t('folderLabel')}</span>
++        <input
++          className={css.input}
++          value={path}
++          placeholder={t('folderPlaceholder')}
++          onChange={(event) => { setPath(event.currentTarget.value) }}
++        />
++      </label>
++      <div className={css.formActions}>
++        <Button
++          variant="primary"
++          size="sm"
++          icon={<IconFolderOpenOutline16 size={14} />}
++          disabled={busy || path.trim().length === 0}
++          onClick={() => { void add() }}
++        >
++          {t('addFromPath')}
++        </Button>
++        <FilePicker
++          kind="plugin"
++          label={t('importFile')}
++          importBundle={importBundle}
++          disabled={busy}
++          onImported={() => { say(t('saved')); onDone() }}
++          onFailed={(message) => { setFailure(`${t('failed')}${message}`) }}
++        />
++      </div>
++      <p className={css.hint}>{t('bundleHint')}</p>
++    </div>
++  )
++}
++
++/** One hidden file input behind a button: the browser's half of importing a bundle. */
++function FilePicker({ kind, label, importBundle, disabled, onImported, onFailed }: {
++  kind: ChestKind
++  label: string
++  importBundle: (kind: ChestKind, file: File) => Promise<ChestActionOutcome>
++  disabled: boolean
++  onImported: () => void
++  onFailed: (value: string) => void
++}) {
++  const input = useRef<HTMLInputElement | null>(null)
++  return (
++    <>
++      <Button
++        variant="outline"
++        size="sm"
++        icon={<IconDownloadOutline16 size={14} />}
++        disabled={disabled}
++        onClick={() => { input.current?.click() }}
++      >
++        {label}
++      </Button>
++      <input
++        ref={input}
++        type="file"
++        accept=".chest,application/json"
++        className={css.hiddenInput}
++        onChange={(event) => {
++          const file = event.currentTarget.files?.[0]
++          event.currentTarget.value = ''
++          if (file === undefined) return
++          void importBundle(kind, file).then((outcome) => {
++            if (outcome.ok) onImported()
++            else onFailed(outcome.message)
++          })
++        }}
++      />
++    </>
++  )
++}
+diff --git a/packages/client/ui-plugin-shelf/src/client/contract.ts b/packages/client/ui-plugin-shelf/src/client/contract.ts
+new file mode 100644
+index 0000000..4d6c7ec
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/src/client/contract.ts
+@@ -0,0 +1,90 @@
++/**
++ * Chest section contracts. The sidebar shell declares the `sidebar.plugins`
++ * hole (single, root scope — see `@deepseek-ai/dsh-client-ui-sidebar/client`)
++ * and passes its fold state; this package registers the occupant.
++ *
++ * The chest listing is a registrant-private reactive fact and rides the
++ * reserved `hooks` compartment: the renderer binds the snapshot source into the
++ * `useChest` selector hook, so the component reads a live view without seeing
++ * the source. Actions arrive as plain callbacks, already unwrapped from the
++ * transport, so the component only ever renders a sentence.
++ */
++import type { HostObservable, InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
++import type { ChestSkillDraft, ChestSnapshot } from '@deepseek-ai/dsh-host-plugin-shelf/types'
++// Type-only: pull the sidebar shell's SlotMap merges so PropsRuntime<'sidebar.plugins'> resolves.
++import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
++
++/** Which half of the chest an action addresses. */
++export type ChestKind = 'plugin' | 'skill'
++
++/**
++ * One settled chest action, unwrapped for the UI. The transport envelope and
++ * the business result are both folded away here: the component shows
++ * `message` and refreshes, and never learns which layer refused.
++ */
++export type ChestActionOutcome =
++  | { readonly ok: true }
++  | { readonly ok: false; readonly message: string }
++
++/** Client-side view of the chest, published through the hooks compartment. */
++export interface ChestView {
++  /** Lifecycle of the listing itself. */
++  readonly status: 'loading' | 'ready' | 'error'
++  /** The listing once a read settled. */
++  readonly snapshot: ChestSnapshot | null
++  /**
++   * Module names the running process has ACTIVE, read from the plugin
++   * inventory. An installed plugin missing here is installed but not yet live,
++   * which is exactly what "restart to apply" means.
++   */
++  readonly liveModules: readonly string[]
++}
++
++/**
++ * Registrant-private injected share: the reactive `chest` hook source plus the
++ * actions the section drives.
++ */
++export interface ChestInjected {
++  /** Re-read the chest and the live plugin inventory. */
++  refresh(): void
++  /** Register a plugin package from an absolute folder path, in place. */
++  addPluginFromPath(path: string): Promise<ChestActionOutcome>
++  /** Install one plugin into the booted profile (a restart applies it). */
++  installPlugin(id: string): Promise<ChestActionOutcome>
++  /** Remove one plugin from the profile. */
++  uninstallPlugin(id: string): Promise<ChestActionOutcome>
++  /** Drop one plugin from the chest (uninstalling it first when installed). */
++  deletePlugin(id: string): Promise<ChestActionOutcome>
++  /** Move one plugin one slot within its section. */
++  movePlugin(id: string, direction: 'up' | 'down'): Promise<ChestActionOutcome>
++  /** Save one plugin package into a `.chest` file the browser downloads. */
++  exportPlugin(id: string): Promise<ChestActionOutcome>
++  /** Author one new skill under the user skill root. */
++  createSkill(draft: ChestSkillDraft): Promise<ChestActionOutcome>
++  /** Rewrite one skill in place. */
++  updateSkill(id: string, draft: ChestSkillDraft): Promise<ChestActionOutcome>
++  /** Remove one skill. */
++  deleteSkill(id: string): Promise<ChestActionOutcome>
++  /** Move one skill one slot within its section. */
++  moveSkill(id: string, direction: 'up' | 'down'): Promise<ChestActionOutcome>
++  /** Save one skill into a `.chest` file the browser downloads. */
++  exportSkill(id: string): Promise<ChestActionOutcome>
++  /** Adopt a `.chest` document the user picked for one section. */
++  importBundle(kind: ChestKind, file: File): Promise<ChestActionOutcome>
++  /** Fold or unfold the section; the preference persists in the browser. */
++  setExpanded(next: boolean): void
++  /**
++   * Live sources bound by the renderer: `useChest` reads the listing and
++   * `useChestExpanded` reads the persisted fold preference.
++   */
++  hooks: {
++    chest: HostObservable<ChestView>
++    chestExpanded: HostObservable<boolean>
++  }
++}
++
++/** Full section props: shell owner share + injected face + locale seat. */
++export type ChestSectionProps =
++  PropsRuntime<'sidebar.plugins'>
++  & InjectFace<ChestInjected>
++  & PropsLocale<'pluginShelf'>
+diff --git a/packages/client/ui-plugin-shelf/src/client/index.ts b/packages/client/ui-plugin-shelf/src/client/index.ts
+new file mode 100644
+index 0000000..1a9b083
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/src/client/index.ts
+@@ -0,0 +1,249 @@
++/**
++ * Chest plugin, browser half. Three registrations:
++ *
++ * - The `sidebar.plugins` section occupant: the chest itself, listing the
++ *   `plugin` and `skill` groups and driving the Host Remotes through plain
++ *   injected callbacks.
++ * - An '@' trigger source: candidates are the same chest entries. Picking a
++ *   skill lands the `/name` reference the skill pipeline already understands;
++ *   picking a plugin lands its package directory, because a plugin is code the
++ *   agent works ON rather than text it acts out.
++ * - Export/import helpers: an export arrives as a `.chest` document and leaves
++ *   as a browser download; an import arrives as a picked file and goes back over
++ *   the same Remote.
++ *
++ * The listing is a registrant-private reactive fact: one snapshot store created
++ * in apply, refreshed on `pluginShelf/change`, on connection resets, and after
++ * every mutation (a mutation answers with the fresh listing, so no second read
++ * is needed). The store also carries the live module names read from the plugin
++ * inventory, which is how a row can tell "installed and running" from
++ * "installed, restart to apply".
++ */
++import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
++import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
++// Type-only: pulls the api-remotes Context merge (ctx.remote + all mounted
++// Remote namespace types) into this compilation face.
++import type {} from '@deepseek-ai/dsh-api-remotes/client'
++// Type-only: pulls the locale plugin's Context merge (ctx.locale).
++import type {} from '@deepseek-ai/dsh-client-locale/client'
++import type {
++  ClientSessionContext, InputTriggerServiceContract, InputTriggerSource,
++} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
++import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
++import type {
++  ChestBundle, ChestExportResult, ChestResult, ChestSkillDraft, ChestSnapshot,
++} from '@deepseek-ai/dsh-host-plugin-shelf/types'
++import { ChestSection } from './ChestSection.tsx'
++import type { ChestActionOutcome, ChestInjected, ChestKind, ChestView } from './contract.ts'
++import { en, zh, type PluginShelfLocaleKey } from './locales.ts'
++import { createChestExpandedStore } from './preference.ts'
++
++declare module '@deepseek-ai/dsh-client-ui-slots' {
++  interface LocaleNamespaceMap {
++    /** Chest section and dialog copy. */
++    pluginShelf: PluginShelfLocaleKey
++  }
++}
++
++/** Dictionary namespace owned by this plugin. */
++export const NS = 'pluginShelf'
++
++export type { ChestActionOutcome, ChestKind, ChestSectionProps, ChestView } from './contract.ts'
++export type { PluginShelfLocaleKey } from './locales.ts'
++
++/** '@' menu group order; the group appears below the subagent source. */
++const SOURCE_ORDER = 20
++
++/** How long a revoked download URL stays alive, so the browser can finish saving. */
++const DOWNLOAD_URL_LIFETIME_MS = 10_000
++
++/** Required services: the trigger pipeline, slot ledger, locale, and both Remotes. */
++export const inject = [
++  'slots', 'locale', 'remote', 'remote.pluginShelf', 'remote.pluginInventory', 'inputTriggers',
++]
++
++/** Await one Remote call without letting a transport rejection escape. */
++async function settle<T>(call: () => Promise<RemoteResult<T>>): Promise<RemoteResult<T> | null> {
++  try {
++    return await call()
++  } catch {
++    return null
++  }
++}
++
++/** Register the '@' source and the sidebar section. */
++export function apply(ctx: ClientContext): void {
++  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-plugin-shelf: dictionaries')
++  const t = ctx.locale.bind(NS)
++
++  const store = createSnapshotStore<ChestView>({ status: 'loading', snapshot: null, liveModules: [] })
++  // The fold is a browser preference, not server state: it persists in
++  // localStorage so a folded chest stays folded across reloads.
++  const expanded = createChestExpandedStore()
++
++  const refresh = (): void => {
++    void Promise.all([
++      ctx.remote.pluginShelf.list().then(result => (result.ok ? result.value : null), () => null),
++      ctx.remote.pluginInventory.list().then(result => (result.ok ? result.value : null), () => null),
++    ]).then(([snapshot, inventory]) => {
++      store.set({
++        status: snapshot === null ? 'error' : 'ready',
++        snapshot,
++        liveModules: (inventory?.entries ?? [])
++          .filter(entry => entry.fiberPhase === 'active')
++          .map(entry => entry.moduleName),
++      })
++    })
++  }
++
++  /** Adopt a listing a mutation already returned, so an action costs one round trip. */
++  const adopt = (snapshot: ChestSnapshot): void => {
++    store.set({ ...store.getSnapshot(), status: 'ready', snapshot })
++  }
++
++  /** Fold the transport envelope and the business result into one sentence for the UI. */
++  const run = async (call: () => Promise<RemoteResult<ChestResult>>): Promise<ChestActionOutcome> => {
++    const result = await settle(call)
++    if (result === null) return { ok: false, message: 'the host did not answer' }
++    if (!result.ok) return { ok: false, message: `${result.error.code}: ${result.error.message}` }
++    if (!result.value.ok) return { ok: false, message: result.value.error.message }
++    adopt(result.value.value)
++    return { ok: true }
++  }
++
++  /** Hand one exported bundle to the browser as a file. */
++  const download = (bundle: ChestBundle): void => {
++    const body = `${JSON.stringify(bundle, null, 2)}\n`
++    const url = URL.createObjectURL(new Blob([body], { type: 'application/json' }))
++    const anchor = document.createElement('a')
++    anchor.href = url
++    anchor.download = `${bundle.id}.chest`
++    document.body.append(anchor)
++    anchor.click()
++    anchor.remove()
++    window.setTimeout(() => { URL.revokeObjectURL(url) }, DOWNLOAD_URL_LIFETIME_MS)
++  }
++
++  /** Export one artifact, downloading it when the Host packed it. */
++  const exportOne = async (
++    call: () => Promise<RemoteResult<ChestExportResult>>,
++  ): Promise<ChestActionOutcome> => {
++    const result = await settle(call)
++    if (result === null) return { ok: false, message: 'the host did not answer' }
++    if (!result.ok) return { ok: false, message: `${result.error.code}: ${result.error.message}` }
++    if (!result.value.ok) return { ok: false, message: result.value.error.message }
++    download(result.value.value)
++    return { ok: true }
++  }
++
++  /** Move one entry one slot within its section, then persist the whole order. */
++  const move = (kind: ChestKind, id: string, direction: 'up' | 'down'): Promise<ChestActionOutcome> => {
++    const snapshot = store.getSnapshot().snapshot
++    const ids = (kind === 'plugin' ? snapshot?.plugins : snapshot?.skills)?.map(entry => entry.id) ?? []
++    const index = ids.indexOf(id)
++    const target = direction === 'up' ? index - 1 : index + 1
++    if (index < 0 || target < 0 || target >= ids.length) return Promise.resolve({ ok: true })
++    const moved = ids[index]
++    const replaced = ids[target]
++    if (moved === undefined || replaced === undefined) return Promise.resolve({ ok: true })
++    const next = [...ids]
++    next[index] = replaced
++    next[target] = moved
++    return kind === 'plugin'
++      ? run(() => ctx.remote.pluginShelf.reorderPlugins(next))
++      : run(() => ctx.remote.pluginShelf.reorderSkills(next))
++  }
++
++  /** Read one picked `.chest` file and hand it to the matching Host method. */
++  const importBundle = async (kind: ChestKind, file: File): Promise<ChestActionOutcome> => {
++    let bundle: ChestBundle
++    try {
++      bundle = JSON.parse(await file.text()) as ChestBundle
++    } catch {
++      return { ok: false, message: `${file.name} is not readable JSON` }
++    }
++    return kind === 'plugin'
++      ? run(() => ctx.remote.pluginShelf.importPlugin({ bundle }))
++      : run(() => ctx.remote.pluginShelf.importSkill(bundle))
++  }
++
++  refresh()
++  ctx.remote.$on('pluginShelf/change', () => { refresh() })
++  ctx.on('connection/reset', () => { refresh() })
++
++  const source: InputTriggerSource = {
++    trigger: '@',
++    name: 'chest',
++    order: SOURCE_ORDER,
++    candidates: (_session: ClientSessionContext, req) => {
++      const { status, snapshot } = store.getSnapshot()
++      if (status !== 'ready' || snapshot === null) return Promise.resolve([])
++      const query = req.query.trim().toLocaleLowerCase()
++      const matches = (name: string, description: string): boolean =>
++        query.length === 0
++        || name.toLocaleLowerCase().includes(query)
++        || description.toLocaleLowerCase().includes(query)
++      const skills = snapshot.skills
++        .filter(entry => matches(entry.name, entry.description))
++        .map(entry => ({
++          name: entry.name,
++          description: entry.userOnly
++            ? `${t('menuUserOnly')} · ${entry.description}`
++            : entry.description,
++        }))
++      const plugins = snapshot.plugins
++        .filter(entry => matches(entry.packageName, entry.description))
++        .map(entry => ({
++          name: entry.packageName,
++          description: `${t('menuPluginPrefix')}${entry.installed ? t('installed') : t('notInstalled')}`,
++        }))
++      return Promise.resolve([...skills, ...plugins])
++    },
++    lexicon: () => {
++      const { status, snapshot } = store.getSnapshot()
++      if (status !== 'ready' || snapshot === null) return undefined
++      return [
++        ...snapshot.skills.map(entry => entry.name),
++        ...snapshot.plugins.map(entry => entry.packageName),
++      ]
++    },
++    subscribeLexicon: () => store.subscribe(() => {}),
++    onPick: ({ candidate }) => {
++      const { snapshot } = store.getSnapshot()
++      if (snapshot === null) return undefined
++      const skill = snapshot.skills.find(entry => entry.name === candidate.name)
++      // A skill is invoked through the pipeline the '/' reference already owns;
++      // the chest only shortens the trip to its name.
++      if (skill !== undefined) return { text: `/${skill.name} ` }
++      const plugin = snapshot.plugins.find(entry => entry.packageName === candidate.name)
++      // A plugin is code the agent works on, so the pick hands over its folder.
++      if (plugin !== undefined) return { text: `${plugin.packageName} (${plugin.path})` }
++      return undefined
++    },
++  }
++  const inputTriggers = ctx.get('inputTriggers') as InputTriggerServiceContract
++  ctx.effect(() => inputTriggers.registerSource(source), 'ui-plugin-shelf: @ source')
++
++  const injected = (): ChestInjected => ({
++    refresh,
++    addPluginFromPath: path => run(() => ctx.remote.pluginShelf.importPlugin({ path })),
++    installPlugin: id => run(() => ctx.remote.pluginShelf.installPlugin(id)),
++    uninstallPlugin: id => run(() => ctx.remote.pluginShelf.uninstallPlugin(id)),
++    deletePlugin: id => run(() => ctx.remote.pluginShelf.deletePlugin(id)),
++    movePlugin: (id, direction) => move('plugin', id, direction),
++    exportPlugin: id => exportOne(() => ctx.remote.pluginShelf.exportPlugin(id)),
++    createSkill: (draft: ChestSkillDraft) => run(() => ctx.remote.pluginShelf.createSkill(draft)),
++    updateSkill: (id, draft) => run(() => ctx.remote.pluginShelf.updateSkill(id, draft)),
++    deleteSkill: id => run(() => ctx.remote.pluginShelf.deleteSkill(id)),
++    moveSkill: (id, direction) => move('skill', id, direction),
++    exportSkill: id => exportOne(() => ctx.remote.pluginShelf.exportSkill(id)),
++    importBundle,
++    setExpanded: (next) => { expanded.set(next) },
++    hooks: { chest: store, chestExpanded: expanded },
++  })
++  ctx.slots.inject('sidebar.plugins', () => ctx.slots.register({
++    name: 'sidebar.plugins',
++    locale: NS,
++    inject: injected,
++  }, ChestSection))
++}
+diff --git a/packages/client/ui-plugin-shelf/src/client/locales.ts b/packages/client/ui-plugin-shelf/src/client/locales.ts
+new file mode 100644
+index 0000000..65da7be
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/src/client/locales.ts
+@@ -0,0 +1,148 @@
++/** Copy dictionaries for the chest sidebar section. No emoji: every glyph the section draws is an icon atom. */
++
++/** Simplified Chinese dictionary and key source of truth. */
++export const zh = {
++  section: 'chest',
++  expand: '展开 chest',
++  collapse: '收起 chest',
++  refresh: '刷新',
++  loading: '正在读取 chest…',
++  error: '暂时无法读取 chest。',
++  retry: '重试',
++  pluginGroup: 'plugin',
++  skillGroup: 'skill',
++  pluginEmpty: '还没有 plugin。点右侧 + 添加本地插件目录，或导入 .chest 文件。',
++  skillEmpty: '还没有 skill。点右侧 + 新建一个 SKILL.md。',
++  loaded: '已读取',
++  add: '添加',
++  addPlugin: '添加 plugin',
++  addSkill: '新建 skill',
++  save: '保存',
++  cancel: '取消',
++  close: '关闭',
++  moveUp: '上移',
++  moveDown: '下移',
++  export: '导出',
++  install: '安装',
++  uninstall: '卸载',
++  remove: '删除',
++  confirmRemove: '确认删除',
++  importFile: '导入 .chest 文件',
++  folderLabel: '本地插件目录',
++  folderPlaceholder: '例如 %USERPROFILE%\\.dsh\\chest\\plugins\\dsh-whale-diving',
++  addFromPath: '添加目录',
++  pluginTitle: 'plugin',
++  pluginAbout: '这个 plugin 的来历与状态',
++  originStore: 'chest 仓库',
++  originExternal: '本地目录',
++  hasPatch: '含补丁层',
++  noPatch: '无补丁层，不能安装',
++  hasClient: '含浏览器界面',
++  onlyHost: '仅 host 侧',
++  installed: '已安装',
++  notInstalled: '未安装',
++  liveNow: '运行中',
++  needsRestart: '待重启生效',
++  restartNotice: 'profile 已改动，重启 dsh web 后生效。',
++  bundleHint: '导出为单个 .chest 文件，对方在 chest 里导入即可。',
++  deleteStoreHint: '会同时删除 chest 仓库里的插件文件。',
++  deleteExternalHint: '只从 chest 移除记录，本地目录的文件不动。',
++  skillName: '名称',
++  skillNamePlaceholder: '例如 代码评审',
++  skillDescription: '描述',
++  skillDescriptionPlaceholder: '一句话说明这个 skill 做什么',
++  skillWhenToUse: '触发时机',
++  skillWhenToUsePlaceholder: '可选：什么时候该用它',
++  skillBody: '正文',
++  skillBodyPlaceholder: 'Markdown 正文，写清具体做法与检查清单',
++  skillUserOnly: '仅手动调用（不进入模型自动目录，用 /名字 调用）',
++  newSkillTitle: '新建 skill',
++  editSkillTitle: '编辑 skill',
++  filesAttached: '附带文件',
++  saved: '已保存',
++  exported: '已导出到下载目录',
++  installedNotice: '已安装，重启 dsh web 后生效',
++  uninstalledNotice: '已卸载，重启 dsh web 后生效',
++  removedNotice: '已删除',
++  failed: '失败：',
++  nameRequired: '名称和描述都不能为空。',
++  noProfile: '找不到 profile 目录，无法安装。',
++  menuGroup: 'chest',
++  menuPluginPrefix: 'plugin · ',
++  menuUserOnly: '仅手动调用',
++} satisfies Record<string, string>
++
++/** Chest locale key union. */
++export type PluginShelfLocaleKey = keyof typeof zh
++
++/** English dictionary checked against the Chinese key set. */
++export const en = {
++  section: 'chest',
++  expand: 'Expand the chest',
++  collapse: 'Collapse the chest',
++  refresh: 'Refresh',
++  loading: 'Reading the chest…',
++  error: 'The chest is temporarily unavailable.',
++  retry: 'Retry',
++  pluginGroup: 'plugin',
++  skillGroup: 'skill',
++  pluginEmpty: 'No plugins yet. Use + to add a local plugin folder, or import a .chest file.',
++  skillEmpty: 'No skills yet. Use + to author one SKILL.md.',
++  loaded: 'Loaded',
++  add: 'Add',
++  addPlugin: 'Add plugin',
++  addSkill: 'New skill',
++  save: 'Save',
++  cancel: 'Cancel',
++  close: 'Close',
++  moveUp: 'Move up',
++  moveDown: 'Move down',
++  export: 'Export',
++  install: 'Install',
++  uninstall: 'Uninstall',
++  remove: 'Delete',
++  confirmRemove: 'Confirm delete',
++  importFile: 'Import a .chest file',
++  folderLabel: 'Local plugin folder',
++  folderPlaceholder: 'e.g. %USERPROFILE%\\.dsh\\chest\\plugins\\dsh-whale-diving',
++  addFromPath: 'Add folder',
++  pluginTitle: 'plugin',
++  pluginAbout: 'Where this plugin comes from and how it stands',
++  originStore: 'chest store',
++  originExternal: 'local folder',
++  hasPatch: 'ships a patch layer',
++  noPatch: 'no patch layer, cannot be installed',
++  hasClient: 'ships a browser half',
++  onlyHost: 'host side only',
++  installed: 'installed',
++  notInstalled: 'not installed',
++  liveNow: 'running',
++  needsRestart: 'applies on restart',
++  restartNotice: 'The profile changed; restart dsh web to apply it.',
++  bundleHint: 'Exports one .chest file the other side imports in its chest.',
++  deleteStoreHint: 'Also deletes the plugin files in the chest store.',
++  deleteExternalHint: 'Only forgets it here; the files in the local folder stay.',
++  skillName: 'Name',
++  skillNamePlaceholder: 'e.g. Code review',
++  skillDescription: 'Description',
++  skillDescriptionPlaceholder: 'One line about what this skill does',
++  skillWhenToUse: 'When to use',
++  skillWhenToUsePlaceholder: 'Optional: when this skill applies',
++  skillBody: 'Body',
++  skillBodyPlaceholder: 'Markdown body: the concrete procedure and checklist',
++  skillUserOnly: 'Manual only (kept out of the model catalog; invoke with /name)',
++  newSkillTitle: 'New skill',
++  editSkillTitle: 'Edit skill',
++  filesAttached: 'attached files',
++  saved: 'Saved',
++  exported: 'Exported to your downloads',
++  installedNotice: 'Installed; restart dsh web to apply it',
++  uninstalledNotice: 'Uninstalled; restart dsh web to apply it',
++  removedNotice: 'Deleted',
++  failed: 'Failed: ',
++  nameRequired: 'Name and description are both required.',
++  noProfile: 'No profile directory was reported, so install is unavailable.',
++  menuGroup: 'chest',
++  menuPluginPrefix: 'plugin · ',
++  menuUserOnly: 'manual only',
++} satisfies Record<PluginShelfLocaleKey, string>
+diff --git a/packages/client/ui-plugin-shelf/src/client/preference.ts b/packages/client/ui-plugin-shelf/src/client/preference.ts
+new file mode 100644
+index 0000000..40580a5
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/src/client/preference.ts
+@@ -0,0 +1,21 @@
++/**
++ * The chest section's fold preference: one browser-wide boolean, persisted to
++ * localStorage under a stable name so a folded chest stays folded across
++ * reloads and sessions. The default is folded — the chest is a place you open to
++ * work in, not a list that competes with the workspace browser for the column.
++ *
++ * @module @deepseek-ai/dsh-client-ui-plugin-shelf/client/preference
++ */
++
++import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
++
++/** localStorage key for the fold preference. */
++export const CHEST_EXPANDED_KEY = 'dsh.chest.expanded'
++
++/**
++ * Create the chest fold preference source.
++ * @returns a persisted source shared by every mount in one plugin lifecycle.
++ */
++export function createChestExpandedStore(): SnapshotStore<boolean> {
++  return createSnapshotStore(false, { persist: { name: CHEST_EXPANDED_KEY } })
++}
+diff --git a/packages/client/ui-plugin-shelf/src/css-modules.d.ts b/packages/client/ui-plugin-shelf/src/css-modules.d.ts
+new file mode 100644
+index 0000000..bc5e482
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/src/css-modules.d.ts
+@@ -0,0 +1,6 @@
++declare module '*.module.css' {
++  const classes: Record<string, string>
++  export default classes
++}
++
++declare module '*.css'
+diff --git a/packages/client/ui-plugin-shelf/src/index.ts b/packages/client/ui-plugin-shelf/src/index.ts
+new file mode 100644
+index 0000000..c5a1ecf
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/src/index.ts
+@@ -0,0 +1,9 @@
++/**
++ * Chest plugin, node half. Pure UI plugin: the empty apply exists so the plugin
++ * appears in the host cordis.yml / Loader; the browser half ships via
++ * exports["./client"], discovered through the package.json dsh.client
++ * declaration.
++ */
++
++/** Host plugin body — no host-side behavior for this UI plugin. */
++export function apply(): void {}
+diff --git a/packages/client/ui-plugin-shelf/src/invariant.ts b/packages/client/ui-plugin-shelf/src/invariant.ts
+new file mode 100644
+index 0000000..d03f366
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/src/invariant.ts
+@@ -0,0 +1,31 @@
++/**
++ * Package-owned invariant companion for `@deepseek-ai/dsh-client-ui-plugin-shelf`.
++ * @module @deepseek-ai/dsh-client-ui-plugin-shelf/invariant
++ */
++
++/* jscpd:ignore-start */
++import type { Context } from '@deepseek-ai/cordis'
++import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
++
++const PACKAGE_NAME = '@deepseek-ai/dsh-client-ui-plugin-shelf'
++
++/** Cordis companion plugin name. */
++export const name = 'client-ui-plugin-shelf-invariant'
++/** Service required before the companion can reserve package ownership. */
++export const inject = ['invariants']
++
++/**
++ * No runtime invariant: one '@' source registration plus one sidebar slot
++ * registration, both effect-disposed; the source owns no cross-plugin mutable
++ * state beyond a snapshot refreshed from the Host Remotes.
++ */
++const install: InvariantInstaller = () => {}
++
++/**
++ * Register this package's invariant companion.
++ * @param ctx - Cordis context carrying the invariant service.
++ * @returns the installed registration's disposer after setup succeeds.
++ */
++export const apply = (ctx: Context): Promise<() => void> =>
++  Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
++/* jscpd:ignore-end */
+diff --git a/packages/client/ui-plugin-shelf/tests/chest.client.spec.ts b/packages/client/ui-plugin-shelf/tests/chest.client.spec.ts
+new file mode 100644
+index 0000000..7eed966
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/tests/chest.client.spec.ts
+@@ -0,0 +1,60 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { en, zh } from '../src/client/locales.ts'
++import { CHEST_EXPANDED_KEY, createChestExpandedStore } from '../src/client/preference.ts'
++
++/** A localStorage stand-in that reports what the browser would have stored. */
++function stubStorage(): Map<string, string> {
++  const entries = new Map<string, string>()
++  vi.stubGlobal('localStorage', {
++    getItem: (key: string) => entries.get(key) ?? null,
++    setItem: (key: string, value: string) => { entries.set(key, value) },
++    removeItem: (key: string) => { entries.delete(key) },
++    clear: () => { entries.clear() },
++  })
++  return entries
++}
++
++afterEach(() => {
++  vi.unstubAllGlobals()
++})
++
++describe('chest fold preference', () => {
++  it('starts folded and writes the choice under the documented key', () => {
++    const entries = stubStorage()
++    const expanded = createChestExpandedStore()
++    expect(expanded.getSnapshot()).toBe(false)
++    expect(entries.get(CHEST_EXPANDED_KEY)).toBeUndefined()
++
++    expanded.set(true)
++    expect(entries.get(CHEST_EXPANDED_KEY)).toBe('true')
++
++    expanded.set(false)
++    expect(entries.get(CHEST_EXPANDED_KEY)).toBe('false')
++  })
++
++  it('rehydrates a previous choice, so a folded chest stays folded', () => {
++    const entries = stubStorage()
++    entries.set(CHEST_EXPANDED_KEY, 'true')
++    expect(createChestExpandedStore().getSnapshot()).toBe(true)
++
++    entries.set(CHEST_EXPANDED_KEY, 'false')
++    expect(createChestExpandedStore().getSnapshot()).toBe(false)
++  })
++})
++
++describe('chest copy', () => {
++  it('carries no emoji in either dictionary', () => {
++    const emoji = /\p{Extended_Pictographic}/u
++    for (const [key, value] of Object.entries(zh)) expect([key, value, emoji.test(value)]).toEqual([key, value, false])
++    for (const [key, value] of Object.entries(en)) expect([key, value, emoji.test(value)]).toEqual([key, value, false])
++  })
++
++  it('keeps the two dictionaries on the same key set', () => {
++    expect(Object.keys(en).sort()).toEqual(Object.keys(zh).sort())
++  })
++
++  it('keeps the section title lowercase as designed', () => {
++    expect(zh.section).toBe('chest')
++    expect(en.section).toBe('chest')
++  })
++})
+diff --git a/packages/client/ui-plugin-shelf/tsconfig.json b/packages/client/ui-plugin-shelf/tsconfig.json
+new file mode 100644
+index 0000000..6e9a6f1
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/tsconfig.json
+@@ -0,0 +1,39 @@
++{
++  "extends": "../../../tsconfig.base.client.json",
++  "compilerOptions": {
++    "rootDir": "src",
++    "outDir": "lib/types"
++  },
++  "include": [
++    "src"
++  ],
++  "references": [
++    {
++      "path": "../../../vendor/cordis"
++    },
++    {
++      "path": "../locale"
++    },
++    {
++      "path": "../runtime"
++    },
++    {
++      "path": "../ui-input-trigger"
++    },
++    {
++      "path": "../ui-primitives"
++    },
++    {
++      "path": "../ui-sidebar"
++    },
++    {
++      "path": "../ui-slots"
++    },
++    {
++      "path": "../../api/remotes/tsconfig.client.json"
++    },
++    {
++      "path": "../../runtime-diagnostics/invariants"
++    }
++  ]
++}
+diff --git a/packages/client/ui-plugin-shelf/tsdown.config.ts b/packages/client/ui-plugin-shelf/tsdown.config.ts
+new file mode 100644
+index 0000000..138df9c
+--- /dev/null
++++ b/packages/client/ui-plugin-shelf/tsdown.config.ts
+@@ -0,0 +1,3 @@
++import { clientBundle } from '../tsdown.client.ts'
++
++export default clientBundle('@deepseek-ai/dsh-client-ui-plugin-shelf', ['lib/types/index.js', 'lib/types/invariant.js'])
+diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
+index d3fe6a6..8eb36b5 100644
+--- a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
++++ b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
+@@ -178,6 +178,10 @@ export function SidebarRoot({
+         })}
+       </div>
+ 
++      {/* The plugin shelf section sits between the browsing region and the
++          foot; it receives only the column state (wide-only occupant). */}
++      {renderSlot('sidebar.plugins', { wide })}
++
+       {/* Footer actions stack above Settings in both sidebar widths. */}
+       <div className={css.footArea}>
+         <div className={css.footerActions}>
+diff --git a/packages/client/ui-sidebar/src/client/contract/slots.ts b/packages/client/ui-sidebar/src/client/contract/slots.ts
+index a8c4f28..daf05b8 100644
+--- a/packages/client/ui-sidebar/src/client/contract/slots.ts
++++ b/packages/client/ui-sidebar/src/client/contract/slots.ts
+@@ -22,6 +22,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+      * registers the browser.
+      */
+     'sidebar.workspaces': { kind: 'single'; scope: 'root'; owner: SidebarSectionOwnerProps }
++    /**
++     * The plugin shelf section between the browsing region and the foot.
++     * Declared by this package's 'sidebar' entry; ui-plugin-shelf registers
++     * the occupant. The shell passes only its column state — it holds no
++     * plugin data.
++     */
++    'sidebar.plugins': { kind: 'single'; scope: 'root'; owner: SidebarPluginsOwnerProps }
+     /**
+      * The settings seat at the sidebar foot. Declared by this package's
+      * 'sidebar' entry; ui-settings registers its trigger row + modal panel.
+@@ -47,6 +54,15 @@ export interface SidebarSectionOwnerProps {
+   expandSidebar: () => void
+ }
+ 
++/**
++ * Owner share of the sidebar plugin shelf seat: the column display state the
++ * occupant must render against (wide row vs 56px rail).
++ */
++export interface SidebarPluginsOwnerProps {
++  /** Whether the sidebar renders wide content (false = 56px rail). */
++  wide: boolean
++}
++
+ /**
+  * Owner share of the sidebar settings seat: the column display state the
+  * occupant's trigger row must render against (wide row vs rail icon).
+@@ -85,5 +101,5 @@ export type SidebarRootInjected = {
+  */
+ export type SidebarRootComponentProps =
+   PropsRuntime<'sidebar'>
+-  & PropsRenderSlots<'sidebar.workspaces' | 'sidebar.settings' | 'sidebar.footer.action'>
++  & PropsRenderSlots<'sidebar.workspaces' | 'sidebar.plugins' | 'sidebar.settings' | 'sidebar.footer.action'>
+   & SidebarRootInjected & PropsLocale<'sidebar'>
+diff --git a/packages/client/ui-sidebar/src/client/index.ts b/packages/client/ui-sidebar/src/client/index.ts
+index 0bd2c98..9cb2818 100644
+--- a/packages/client/ui-sidebar/src/client/index.ts
++++ b/packages/client/ui-sidebar/src/client/index.ts
+@@ -7,7 +7,7 @@ import { SidebarRoot } from './SidebarRoot.tsx'
+ import { en, zh, type SidebarKey } from './locales.ts'
+ 
+ export type {
+-  SidebarFooterActionOwnerProps, SidebarRootComponentProps, SidebarRootInjected,
++  SidebarFooterActionOwnerProps, SidebarPluginsOwnerProps, SidebarRootComponentProps, SidebarRootInjected,
+   SidebarSectionOwnerProps, SidebarSettingsOwnerProps,
+ } from './contract/slots.ts'
+ export type { SidebarKey } from './locales.ts'
+@@ -42,10 +42,12 @@ export function apply(ctx: ClientContext): void {
+       name: 'sidebar',
+       locale: NS,
+       // The shell owns geometry; ui-workspace registers the whole browsing
+-      // region (header, search, session list, workspace dialogs), ui-settings
+-      // registers the foot trigger + settings panel.
++      // region (header, search, session list, workspace dialogs), the plugin
++      // shelf section fills the hole below it, ui-settings registers the
++      // foot trigger + settings panel.
+       children: {
+         'sidebar.workspaces': { kind: 'single', scope: 'root' },
++        'sidebar.plugins': { kind: 'single', scope: 'root' },
+         'sidebar.settings': { kind: 'single', scope: 'root' },
+         'sidebar.footer.action': { kind: 'list', scope: 'root' },
+       },
+diff --git a/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap b/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap
+index f82fbc1..d678d77 100644
+--- a/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap
++++ b/packages/client/ui-sidebar/tests/__snapshots__/sidebar-snapshot.client.spec.tsx.snap
+@@ -59,6 +59,10 @@ exports[`sidebar shell snapshots > renders the collapsed rail after the crossfad
+         style="display: contents;"
+       />
+     </div>
++    <div
++      data-slot="sidebar.plugins"
++      style="display: contents;"
++    />
+     <div
+       class="footArea"
+     >
+@@ -152,6 +156,10 @@ exports[`sidebar shell snapshots > renders the expanded column (wordmark, capsul
+         style="display: contents;"
+       />
+     </div>
++    <div
++      data-slot="sidebar.plugins"
++      style="display: contents;"
++    />
+     <div
+       class="footArea"
+     >
+@@ -245,6 +253,10 @@ exports[`sidebar shell snapshots > renders the expanded column in the default lo
+         style="display: contents;"
+       />
+     </div>
++    <div
++      data-slot="sidebar.plugins"
++      style="display: contents;"
++    />
+     <div
+       class="footArea"
+     >
+diff --git a/packages/client/ui-sidebar/tests/sidebar-root.client.spec.tsx b/packages/client/ui-sidebar/tests/sidebar-root.client.spec.tsx
+index 8f53c92..875e5f3 100644
+--- a/packages/client/ui-sidebar/tests/sidebar-root.client.spec.tsx
++++ b/packages/client/ui-sidebar/tests/sidebar-root.client.spec.tsx
+@@ -2,7 +2,7 @@
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+ import type {
+-  SidebarFooterActionOwnerProps, SidebarRootComponentProps, SidebarSectionOwnerProps,
++  SidebarFooterActionOwnerProps, SidebarPluginsOwnerProps, SidebarRootComponentProps, SidebarSectionOwnerProps,
+   SidebarSettingsOwnerProps,
+ } from '../src/client/contract/slots.ts'
+ import { SidebarRoot } from '../src/client/SidebarRoot.tsx'
+@@ -25,6 +25,7 @@ function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; w
+   const startSession = vi.fn()
+   const toggleSidebar = vi.fn()
+   let regionOwner: SidebarSectionOwnerProps | undefined
++  let pluginsOwner: SidebarPluginsOwnerProps | undefined
+   let settingsOwner: SidebarSettingsOwnerProps | undefined
+   let footerActionOwner: SidebarFooterActionOwnerProps | undefined
+   let current = { collapsed, width }
+@@ -35,7 +36,7 @@ function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; w
+       startSession={startSession} toggleSidebar={toggleSidebar} t={t}
+       renderSlot={((
+         key: string,
+-        owner: SidebarFooterActionOwnerProps | SidebarSectionOwnerProps | SidebarSettingsOwnerProps,
++        owner: SidebarFooterActionOwnerProps | SidebarPluginsOwnerProps | SidebarSectionOwnerProps | SidebarSettingsOwnerProps,
+       ) => {
+         if (key === 'sidebar.settings') {
+           settingsOwner = owner
+@@ -45,6 +46,10 @@ function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; w
+           footerActionOwner = owner
+           return <div data-testid="footer-action-seat" data-wide={owner.wide} />
+         }
++        if (key === 'sidebar.plugins') {
++          pluginsOwner = owner
++          return <div data-testid="plugins-seat" data-wide={owner.wide} />
++        }
+         regionOwner = owner as SidebarSectionOwnerProps
+         return <div data-testid="region" data-wide={owner.wide} />
+       }) as SidebarRootComponentProps['renderSlot']}
+@@ -58,6 +63,10 @@ function mountShell({ collapsed = false, width = 300 }: { collapsed?: boolean; w
+       if (regionOwner === undefined) throw new Error('region owner not rendered')
+       return regionOwner
+     },
++    pluginsOwner: () => {
++      if (pluginsOwner === undefined) throw new Error('plugins owner not rendered')
++      return pluginsOwner
++    },
+     settingsOwner: () => {
+       if (settingsOwner === undefined) throw new Error('settings owner not rendered')
+       return settingsOwner
+@@ -88,6 +97,9 @@ describe('SidebarRoot shell', () => {
+   it('hands the region its wide flag and clamps expandSidebar to the collapsed state', () => {
+     const b = mountShell()
+     expect(b.regionOwner().wide).toBe(true)
++    // The chest seat rides the same wide flag (ui-plugin-shelf renders
++    // only in the wide column).
++    expect(b.pluginsOwner().wide).toBe(true)
+     // The settings seat rides the same wide flag (ui-settings renders the row).
+     expect(b.settingsOwner().wide).toBe(true)
+     expect(b.footerActionOwner().wide).toBe(true)
+@@ -105,6 +117,7 @@ describe('SidebarRoot shell', () => {
+     vi.advanceTimersByTime(200)
+     b.rerender({})
+     expect(b.regionOwner().wide).toBe(false)
++    expect(b.pluginsOwner().wide).toBe(false)
+     expect(b.footerActionOwner().wide).toBe(false)
+     expect(screen.getByTestId('region')).toBeTruthy()
+     b.regionOwner().expandSidebar()
+diff --git a/tsconfig.client.json b/tsconfig.client.json
+index e599f76..bde98f8 100644
+--- a/tsconfig.client.json
++++ b/tsconfig.client.json
+@@ -91,6 +91,7 @@
+     { "path": "./packages/client/ui-settings-general" },
+     { "path": "./packages/client/ui-settings-models" },
+     { "path": "./packages/client/ui-settings-plugin-inventory" },
++    { "path": "./packages/client/ui-plugin-shelf" },
+     { "path": "./packages/client/locale" },
+     { "path": "./packages/client/web" },
+     { "path": "./apps/web" }
+-- 
+2.54.0.windows.1
+

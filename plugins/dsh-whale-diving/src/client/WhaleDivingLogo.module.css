@@ -1,0 +1,146 @@
+/* One 3.6s cycle aligns with two sweeps of the adjacent status copy. */
+
+.root {
+  position: relative;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-right: 6px;
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.whale {
+  position: absolute;
+  left: 3px;
+  bottom: 4px;
+  display: flex;
+  animation: dsh-whale-path 3.6s linear infinite;
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+  z-index: 2;
+}
+
+.whale > svg {
+  transform-box: fill-box;
+  transform-origin: 52% 72%;
+  animation: dsh-whale-pose 3.6s linear infinite;
+  will-change: transform;
+}
+
+.fx {
+  position: absolute;
+  inset: 0;
+  width: 22px;
+  height: 22px;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.surface,
+.ripple,
+.spray,
+.splash {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+}
+
+.surface {
+  stroke-width: 1.1;
+  opacity: 0.28;
+}
+
+.ripple,
+.spray,
+.splash {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+}
+
+.ripple {
+  stroke-width: 0.9;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: dsh-whale-ripple 3.6s linear infinite;
+}
+
+.spray {
+  stroke-width: 1.05;
+  animation: dsh-whale-spray 3.6s linear infinite;
+}
+
+.splash {
+  stroke-width: 1;
+  animation: dsh-whale-splash 3.6s linear infinite;
+}
+
+@keyframes dsh-whale-path {
+  0%, 8% { transform: translate3d(0, 8px, 0); opacity: 0; }
+  16% { transform: translate3d(-0.5px, 4px, 0); opacity: 0.45; }
+  24% { transform: translate3d(-1px, 0, 0); opacity: 1; }
+  32% { transform: translate3d(-0.5px, -2px, 0); opacity: 1; }
+  40% { transform: translate3d(0, -3px, 0); opacity: 1; }
+  48% { transform: translate3d(0.5px, -2px, 0); opacity: 1; }
+  56% { transform: translate3d(1px, 0, 0); opacity: 1; }
+  64% { transform: translate3d(0.5px, 3px, 0); opacity: 0.9; }
+  72% { transform: translate3d(-0.5px, 8px, 0); opacity: 0; }
+  100% { transform: translate3d(0, 8px, 0); opacity: 0; }
+}
+
+@keyframes dsh-whale-pose {
+  0%, 16% { transform: rotate(0deg); }
+  32% { transform: rotate(9deg); }
+  40% { transform: rotate(8deg); }
+  48% { transform: rotate(3deg); }
+  56% { transform: rotate(-5deg); }
+  64% { transform: rotate(-18deg); }
+  72% { transform: rotate(-25deg); }
+  80%, 100% { transform: rotate(0deg); }
+}
+
+@keyframes dsh-whale-spray {
+  0%, 24% { stroke-dashoffset: 1; opacity: 0; }
+  31% { stroke-dashoffset: 0; opacity: 0.85; }
+  40% { stroke-dashoffset: 0; opacity: 0.7; }
+  48% { stroke-dashoffset: -1; opacity: 0; }
+  100% { stroke-dashoffset: 1; opacity: 0; }
+}
+
+@keyframes dsh-whale-splash {
+  0%, 57% { stroke-dashoffset: 1; opacity: 0; }
+  64% { stroke-dashoffset: 0; opacity: 0.75; }
+  72% { stroke-dashoffset: -1; opacity: 0; }
+  100% { stroke-dashoffset: 1; opacity: 0; }
+}
+
+@keyframes dsh-whale-ripple {
+  0%, 59% { stroke-dashoffset: 1; transform: scaleX(0.2); opacity: 0; }
+  65% { stroke-dashoffset: 0; transform: scaleX(0.38); opacity: 0.6; }
+  75% { stroke-dashoffset: 0; transform: scaleX(0.72); opacity: 0.45; }
+  88% { stroke-dashoffset: 0; transform: scaleX(1); opacity: 0; }
+  100% { stroke-dashoffset: 1; transform: scaleX(1); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .whale,
+  .whale > svg,
+  .ripple {
+    animation: none;
+  }
+
+  .whale {
+    transform: translateY(-1px);
+    opacity: 1;
+  }
+
+  .ripple {
+    stroke-dashoffset: 0;
+    transform: scaleX(0.72);
+    opacity: 0.55;
+  }
+
+  .spray,
+  .splash {
+    display: none;
+  }
+}

@@ -1,0 +1,26 @@
+# NOTICE · 归属与来源
+
+## 本仓库
+
+chest 的两个包（`packages/host/plugin-shelf`、`packages/client/ui-plugin-shelf`）、示例插件
+（`plugins/dsh-whale-diving`）、脚本与文档均为原创作品，按 MIT 许可发布，见 [LICENSE](LICENSE)，
+版权归 ZeroCode321。
+
+## 上游项目
+
+`patches/` 下的补丁应用于 **DeepSeek Harness**：
+
+- 项目：<https://github.com/deepseek-ai/deepseek-harness>
+- 许可：MIT License，Copyright (c) 2026 DeepSeek
+
+本仓库**不包含** DeepSeek Harness 的源代码。补丁文件只包含针对它的差量，以及新增的自研文件；
+补丁的应用目标是使用者自己持有的该项目检出。补丁中引用的文件路径、模块名与既有 API 属于上游项目，
+其版权与许可由上游项目及其许可条款管辖。
+
+使用或再分发时请保留上游的许可与版权声明。上游项目的 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`
+对上游代码继续有效。
+
+## 图片来源
+
+`docs/screenshots/` 下的截图来自本项目的界面实测，界面配色与图标由 DeepSeek Harness 的主题令牌与
+图标原子提供。

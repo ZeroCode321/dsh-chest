@@ -1,0 +1,14 @@
+# 构建输出与依赖
+node_modules/
+lib/
+dist/
+*.tsbuildinfo
+
+# 验收脚本的运行产物（截图与导出的 .chest 文件）
+.shots/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

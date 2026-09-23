@@ -1,0 +1,170 @@
+From 5265b15cef9bc3c72d06495516d7ceb7e80e0562 Mon Sep 17 00:00:00 2001
+From: ZeroCode321 <ZeroCode321@users.noreply.github.com>
+Date: Wed, 23 Sep 2026 00:20:27 +0800
+Subject: [PATCH] feat(conversation): declare a turn-status icon seat and ship
+ the whale as a plugin
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`conversation.chat.turnStatusIcon` is a single, session-scoped seat beside the
+running turn status. Unoccupied it renders nothing, so the status keeps its
+text-only footprint and a deployment can drop the whale without touching this
+package.
+
+The whale itself is no longer a built-in row: it ships as a standalone plugin
+package (dsh-whale-diving) that a profile installs, which is what makes it
+manageable from the chest — install, uninstall, reorder, export, delete.
+---
+ packages/bundle/web-app/cordis.patch.yml            | 10 ++++++++++
+ packages/bundle/web-app/package.json                |  2 ++
+ packages/client/ui-conversation/src/client/apply.ts |  1 +
+ .../ui-conversation/src/client/chat/ChatView.tsx    |  7 +++++--
+ .../ui-conversation/src/client/contract/slots.ts    | 13 ++++++++++++-
+ 5 files changed, 30 insertions(+), 3 deletions(-)
+
+diff --git a/packages/bundle/web-app/cordis.patch.yml b/packages/bundle/web-app/cordis.patch.yml
+index b06e63b..a364f11 100644
+--- a/packages/bundle/web-app/cordis.patch.yml
++++ b/packages/bundle/web-app/cordis.patch.yml
+@@ -94,6 +94,11 @@
+     - id: plugin-inventory
+       name: '@deepseek-ai/dsh-host-plugin-inventory'
+ 
++    # Personal plugin shelf: the user's plugin directory scanned and served to
++    # the browser (sidebar section + '@' composer source).
++    - id: plugin-shelf
++      name: '@deepseek-ai/dsh-host-plugin-shelf'
++
+     # The API gateway: the transport-agnostic dispatch face every client shape
+     # shares. The base layer's agent-default-model service owns the default model.
+     - id: api-gateway
+@@ -195,6 +200,10 @@
+     - id: ui-settings-plugin-inventory
+       name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory'
+ 
++    # Personal plugin shelf: the sidebar section plus the '@' source.
++    - id: ui-plugin-shelf
++      name: '@deepseek-ai/dsh-client-ui-plugin-shelf'
++
+     - id: ui-conversation
+       name: '@deepseek-ai/dsh-client-ui-conversation'
+ 
+@@ -270,6 +279,7 @@
+     - id: ui-user-questions
+       name: '@deepseek-ai/dsh-client-ui-user-questions'
+ 
++
+     - id: ui-trajectory
+       name: '@deepseek-ai/dsh-client-ui-trajectory'
+ 
+diff --git a/packages/bundle/web-app/package.json b/packages/bundle/web-app/package.json
+index ca4709a..cea931f 100644
+--- a/packages/bundle/web-app/package.json
++++ b/packages/bundle/web-app/package.json
+@@ -65,6 +65,7 @@
+     "@deepseek-ai/dsh-client-ui-model-selection": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-settings-models": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-settings-plugin-inventory": "workspace:^",
++    "@deepseek-ai/dsh-client-ui-plugin-shelf": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-permission-presets": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-plan": "workspace:^",
+     "@deepseek-ai/dsh-client-ui-settings-plugins": "workspace:^",
+@@ -92,6 +93,7 @@
+     "@deepseek-ai/dsh-host-directory-picker-browse": "workspace:^",
+     "@deepseek-ai/dsh-host-directory-picker-native": "workspace:^",
+     "@deepseek-ai/dsh-host-plugin-inventory": "workspace:^",
++    "@deepseek-ai/dsh-host-plugin-shelf": "workspace:^",
+     "@deepseek-ai/dsh-host-webserver": "workspace:^",
+     "@deepseek-ai/dsh-message-feedback": "workspace:^",
+     "@deepseek-ai/dsh-session-projection-cache": "workspace:^",
+diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/client/ui-conversation/src/client/apply.ts
+index f57caea..4271329 100644
+--- a/packages/client/ui-conversation/src/client/apply.ts
++++ b/packages/client/ui-conversation/src/client/apply.ts
+@@ -381,6 +381,7 @@ export function apply(ctx: Context): void {
+     locale: NS,
+     children: {
+       'conversation.chat.node': { kind: 'keyed', scope: 'session', inject: CHAT_NODE_INJECT },
++      'conversation.chat.turnStatusIcon': { kind: 'single', scope: 'session' },
+     },
+     store: chatStore,
+     inject: (sessionId: SessionId, actions: BoundActions<typeof chatStore>): ChatViewInjected => {
+diff --git a/packages/client/ui-conversation/src/client/chat/ChatView.tsx b/packages/client/ui-conversation/src/client/chat/ChatView.tsx
+index 58e63b3..13cee77 100644
+--- a/packages/client/ui-conversation/src/client/chat/ChatView.tsx
++++ b/packages/client/ui-conversation/src/client/chat/ChatView.tsx
+@@ -104,12 +104,14 @@ function runningTurnStartTime(timeline: ConversationTimelineSnapshot): number |
+ }
+ 
+ /** Turn-level model activity label retained across first-token, tool, and streaming phases. */
+-function TurnStatus({ startTime, t }: {
++function TurnStatus({ startTime, t, renderSlot }: {
+   /** The running turn's logged `turn/start` time; null falls back to mount
+    *  time when that boundary is outside the window. */
+   startTime: number | null
+   /** The owning view's locale seat. */
+   t: ChatViewSlotProps['t']
++  /** The chat view's slot renderer, for the decorative turn-status icon seat. */
++  renderSlot: ChatViewSlotProps['renderSlot']
+ }) {
+   const [mountedAt] = useState(() => Date.now())
+   // Anchored to turn/start so a mid-turn reload keeps the real
+@@ -129,6 +131,7 @@ function TurnStatus({ startTime, t }: {
+   const showClock = elapsedMs >= 15_000
+   return (
+     <div className={css.turnStatus} role="status" aria-live="polite">
++      {renderSlot('conversation.chat.turnStatusIcon', {})}
+       Deep diving...
+       {showClock && (
+         <span className={css.turnStatusClock} aria-hidden>
+@@ -400,7 +403,7 @@ export function ChatView({
+               double-render the same wait. */}
+           {/* Turn-level loading signal: rides the whole running turn (first-token
+               wait, tool execution, streaming) so it never flickers per step. */}
+-          {running && <TurnStatus startTime={runningTurnStart} t={t} />}
++          {running && <TurnStatus startTime={runningTurnStart} t={t} renderSlot={renderSlot} />}
+           {pendingSteering.map(item => (
+             <PendingSteeringBubble key={item.id} content={item.content} loadImage={loadImage} t={t} />
+           ))}
+diff --git a/packages/client/ui-conversation/src/client/contract/slots.ts b/packages/client/ui-conversation/src/client/contract/slots.ts
+index 2125914..4ed481f 100644
+--- a/packages/client/ui-conversation/src/client/contract/slots.ts
++++ b/packages/client/ui-conversation/src/client/contract/slots.ts
+@@ -92,6 +92,14 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+      * registration, and a domain upgrades by registering one row component.
+      */
+     'conversation.chat.commandview': { kind: 'keyed'; scope: 'session'; owner: CommandRowOwnerProps }
++    /**
++     * The decorative activity icon beside the chat flow's running turn
++     * status ("Deep diving..."). Session scope; empty owner share — the icon
++     * animates itself and is mounted only while a turn runs, so the occupant
++     * needs nothing from the render site. Unoccupied, the seat renders
++     * nothing and the status keeps its text-only footprint.
++     */
++    'conversation.chat.turnStatusIcon': { kind: 'single'; scope: 'session'; owner: TurnStatusIconOwnerProps }
+     /**
+      * The completed Turn Node's extension chain, rendered before that Node's
+      * IconActions. Entries derive a match from the engine-owned Turn and
+@@ -340,6 +348,9 @@ export interface AssistantActionOwnerProps {
+   messageId: MessageId
+ }
+ 
++/** Owner share of the turn-status icon seat: the render site supplies nothing. */
++export interface TurnStatusIconOwnerProps {}
++
+ /** Hook constrained to business data published on the current Chat Node's Turn. */
+ export type UseChatNodeTurnData = <Key extends Extract<keyof ConversationTurnDataMap, string>>(
+   key: Key,
+@@ -709,7 +720,7 @@ export interface ChatViewInjected {
+ 
+ /** Full chat-view component props: runtime & its Tool/command/tail render shares & store & injected & locale seat. */
+ export type ChatViewSlotProps =
+-  PropsRuntime<'conversation.view'> & PropsRenderSlots<'conversation.chat.node'>
++  PropsRuntime<'conversation.view'> & PropsRenderSlots<'conversation.chat.node' | 'conversation.chat.turnStatusIcon'>
+   & PropsStore<ChatStore> & ChatViewInjected & PropsLocale<'conversation'>
+ 
+ /**
+-- 
+2.54.0.windows.1
+

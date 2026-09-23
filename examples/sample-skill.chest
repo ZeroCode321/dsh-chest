@@ -1,0 +1,16 @@
+{
+  "format": "dsh-chest",
+  "revision": 1,
+  "kind": "skill",
+  "id": "chest-自检技能",
+  "name": "chest 自检技能",
+  "description": "验证 chest 能否写出真实的 SKILL.md",
+  "createdAt": 1790091324163,
+  "files": [
+    {
+      "path": "SKILL.md",
+      "encoding": "utf8",
+      "content": "---\nname: \"chest 自检技能\"\ndescription: \"验证 chest 能否写出真实的 SKILL.md\"\nwhenToUse: \"当需要确认 chest 的 skill 功能时\"\n---\n\n# 自检\n\n1. 确认文件落盘\n2. 确认能被技能目录发现\n"
+    }
+  ]
+}
